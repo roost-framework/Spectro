@@ -15,7 +15,8 @@ import SpectroCommon
 public struct Query<T: Schema>: Sendable {
     private let schema: T.Type
     internal let executor: any QueryExecutor
-    internal var whereClause: String = ""
+    // Read through buildWhereClause(), which adds the soft-delete filter.
+    private var whereClause: String = ""
     private var whereParameters: [PostgresData] = []
     // Bindings follow SQL clause order, independently of builder call order.
     internal var parameters: [PostgresData] {
@@ -470,7 +471,7 @@ public struct Query<T: Schema>: Sendable {
         return renumberPlaceholders(in: sql)
     }
 
-    private func buildWhereClause() -> String {
+    internal func buildWhereClause() -> String {
         if includeSoftDeleted { return whereClause }
         guard let sdf = T.softDeleteColumn else { return whereClause }
         let column = joins.isEmpty ? sdf.quoted : "\(T.tableName.quoted).\(sdf.quoted)"
@@ -481,11 +482,12 @@ public struct Query<T: Schema>: Sendable {
     private func buildAggregateSQL(function: String, column: String) -> String {
         let table = T.tableName.quoted
         let joinClause = buildJoinClause()
+        let effectiveWhere = buildWhereClause()
 
         var sql = "SELECT CAST(\(function)(\(column.snakeCase().quoted)) AS DOUBLE PRECISION) as agg_result FROM \(table)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
-        if !whereClause.isEmpty { sql += " WHERE \(whereClause)" }
+        if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
 
         return renumberPlaceholders(in: sql)
     }
@@ -494,12 +496,13 @@ public struct Query<T: Schema>: Sendable {
         let table = T.tableName.quoted
         let groupColumns = groupByFields.map { $0.quoted }.joined(separator: ", ")
         let joinClause = buildJoinClause()
+        let effectiveWhere = buildWhereClause()
 
         let colExpr = column == "*" ? "*" : column.snakeCase().quoted
         var sql = "SELECT \(groupColumns), CAST(\(function)(\(colExpr)) AS DOUBLE PRECISION) as agg_result FROM \(table)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
-        if !whereClause.isEmpty { sql += " WHERE \(whereClause)" }
+        if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
         sql += " GROUP BY \(groupColumns)"
         if !havingClause.isEmpty { sql += " HAVING \(havingClause)" }
 
@@ -645,13 +648,14 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
         let table = T.tableName.quoted
         let selectClause = selectedFields.map { $0.quoted }.joined(separator: ", ")
         let joinClause = baseQuery.buildJoinClause()
+        let effectiveWhere = baseQuery.buildWhereClause()
         let orderClause = baseQuery.buildOrderClause()
         let limitClause = baseQuery.buildLimitClause()
 
         var sql = "SELECT \(selectClause) FROM \(table)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
-        if !baseQuery.whereClause.isEmpty { sql += " WHERE \(baseQuery.whereClause)" }
+        if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
         if !orderClause.isEmpty { sql += " ORDER BY \(orderClause)" }
         if !limitClause.isEmpty { sql += limitClause }
 

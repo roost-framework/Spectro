@@ -21,6 +21,7 @@ struct QueryBindingTests {
 
     private struct SoftPost: Schema {
         @ID var id: UUID
+        @Column var views: Int = 0
         static let tableName = "soft_posts"
         static var softDeleteColumn: String? { "deleted_at" }
         init() {}
@@ -91,6 +92,21 @@ struct QueryBindingTests {
         #expect(await recorder.statements.first?.contains(
             #"HAVING (("name" = $1) OR ("name" = $2)) AND ("name" != $3)"#
         ) == true)
+    }
+
+    @Test("Aggregates and selected fields exclude soft-deleted rows unless withDeleted")
+    func softDeleteAggregatesAndSelect() async throws {
+        let recorder = Recorder()
+        let base = Query(schema: SoftPost.self, executor: recorder)
+        for query in [base, base.withDeleted()] {
+            _ = try await query.sum { $0.views }
+            _ = try await query.groupBy { $0.views }.groupedCount()
+            _ = try await query.select { $0.views }.all()
+        }
+        let statements = await recorder.statements
+        #expect(statements.count == 6)
+        #expect(statements.prefix(3).allSatisfy { $0.contains(#"WHERE "deleted_at" IS NULL"#) })
+        #expect(statements.suffix(3).allSatisfy { !$0.contains("deleted_at") })
     }
 
     @Test("Join parameters precede filters regardless of builder call order")
