@@ -61,6 +61,38 @@ struct QueryBindingTests {
         #expect(await recorder.statements.first?.contains("WHERE \"\(SoftUser.tableName)\".\"deleted_at\" IS NULL") == true)
     }
 
+    @Test("A where clause chained after an OR still constrains every row")
+    func chainedWhereAfterOr() async throws {
+        let recorder = Recorder()
+        let query = Query(schema: TestUser.self, executor: recorder)
+            .where { $0.name == "Alice" || $0.name == "Bob" }
+            .where { $0.isActive == true }
+        let expected = #"WHERE (("name" = $1) OR ("name" = $2)) AND ("is_active" = $3)"#
+        #expect(query.buildSQL().contains(expected))
+        _ = try await query.count()
+        #expect(await recorder.statements.first?.contains(expected) == true)
+    }
+
+    @Test("The soft-delete filter applies to both sides of an OR")
+    func softDeleteAroundOr() {
+        let query = Query(schema: SoftUser.self, executor: Recorder())
+            .where { $0.name == "Alice" || $0.name == "Bob" }
+        #expect(query.buildSQL().contains(#"WHERE "deleted_at" IS NULL AND (("name" = $1) OR ("name" = $2))"#))
+    }
+
+    @Test("A having clause chained after an OR still constrains every group")
+    func chainedHavingAfterOr() async throws {
+        let recorder = Recorder()
+        _ = try await Query(schema: TestUser.self, executor: recorder)
+            .groupBy { $0.name }
+            .having { $0.name == "Alice" || $0.name == "Bob" }
+            .having { $0.name != "Excluded" }
+            .groupedCount()
+        #expect(await recorder.statements.first?.contains(
+            #"HAVING (("name" = $1) OR ("name" = $2)) AND ("name" != $3)"#
+        ) == true)
+    }
+
     @Test("Join parameters precede filters regardless of builder call order")
     func bindingsFollowSQL() async throws {
         let recorder = Recorder()

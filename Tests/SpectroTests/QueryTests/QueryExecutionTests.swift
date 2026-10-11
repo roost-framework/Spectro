@@ -61,6 +61,19 @@ struct QueryExecutionTests {
         }
     }
 
+    @Test("A where clause chained after an OR excludes rows it does not match")
+    func chainedWhereAfterOr() async throws {
+        try await withSeededTable { repo in
+            let query = repo.query(TestUser.self)
+                .where { $0.name == "Charlie" || $0.name == "Alice" }
+                .where { $0.isActive == true }
+            let users = try await query.all()
+            let count = try await query.count()
+            #expect(users.map(\.name) == ["Alice"])
+            #expect(count == 1)
+        }
+    }
+
     @Test("Where clause with comparison operators")
     func whereComparison() async throws {
         try await withSeededTable { repo in

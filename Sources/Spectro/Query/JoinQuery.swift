@@ -43,9 +43,7 @@ public struct JoinQuery<T: Schema, U: Schema>: Sendable {
         let builder = JoinQueryBuilder<T, U>()
         let queryCondition = condition(builder)
 
-        let newBaseQuery = baseQuery.where { _ in
-            QueryCondition(sql: "(\(queryCondition.sql))", parameters: queryCondition.parameters)
-        }
+        let newBaseQuery = baseQuery.where { _ in queryCondition }
 
         return JoinQuery(baseQuery: newBaseQuery, joinedSchema: joinedSchema, joinClause: joinClause)
     }
