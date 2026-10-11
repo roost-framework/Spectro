@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.2 — 2026-10-11
+
+- Exclude soft-deleted records from `sum`, `avg`, `min`, `max`, their `grouped` forms, and `select`. These read the query's filters without the automatic soft-delete filter, so `select` returned soft-deleted records' values and aggregates counted them, while `all()` and `count()` on the same query excluded them. `.withDeleted()` still includes them. Every release since soft deletes were added in 2.0.0 is affected.
+- Report 2.3.2 from `spectro --version`, pin the Mint installation examples and the Mintfile to 2.3.2, and require 2.3.2 in the package installation examples.
+
+[Full comparison with 2.3.1](https://github.com/roost-framework/Spectro/compare/2.3.1...2.3.2)
+
 ## 2.3.1 — 2026-10-11
 
 - Fix queries that combine `||` with other filters returning rows those filters should exclude. `Query.where` joined clauses with a bare `AND`, so `.where { $0.a == x || $0.b == y }.where { $0.ownerID == me }` ran as `a = x OR (b = y AND owner_id = me)` and returned other owners' rows matching `a`. The automatic soft-delete filter was combined the same way, so a single `||` condition also returned soft-deleted rows. Each `where` and `having` clause is now parenthesized. Every earlier release is affected; upgrade if any query combines `||` with an ownership, tenant, or authorization filter.
