@@ -53,7 +53,9 @@ public struct Query<T: Schema>: Sendable {
         if !copy.whereClause.isEmpty {
             copy.whereClause += " AND "
         }
-        copy.whereClause += queryCondition.sql
+        // Parenthesize each clause so an OR inside it cannot absorb the clauses
+        // and soft-delete filter that are ANDed around it.
+        copy.whereClause += "(\(queryCondition.sql))"
         copy.whereParameters.append(contentsOf: queryCondition.parameters)
 
         return copy
@@ -253,7 +255,7 @@ public struct Query<T: Schema>: Sendable {
         if !copy.havingClause.isEmpty {
             copy.havingClause += " AND "
         }
-        copy.havingClause += cond.sql
+        copy.havingClause += "(\(cond.sql))"
         copy.havingParameters.append(contentsOf: cond.parameters)
         return copy
     }
