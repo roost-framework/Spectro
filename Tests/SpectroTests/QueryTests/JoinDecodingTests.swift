@@ -73,6 +73,21 @@ extension DatabaseIntegrationTests {
             }
         }
 
+        @Test("Filters, ordering, selection, and join conditions use custom column names")
+        func customColumnNames() async throws {
+            try await withTables { repo, authorID, articleID in
+                let authors = try await repo.query(JoinAuthor.self)
+                    .where { $0.name == "Author" }.orderBy { $0.name }.all()
+                #expect(authors.map(\.id) == [authorID])
+                #expect(try await repo.query(JoinAuthor.self).select { $0.name }.all() == ["Author"])
+                let pair = try await repo.query(JoinAuthor.self)
+                    .join(JoinArticle.self, on: { $0.left.id == $0.right.authorId })
+                    .executeJoin(with: JoinArticle.self)
+                    .where { $0.joined.name == "Article" }.first()
+                #expect(pair?.1?.id == articleID)
+            }
+        }
+
         @Test("An unmatched left join returns nil instead of a default model")
         func unmatchedLeftJoin() async throws {
             try await withTables { repo, authorID, _ in

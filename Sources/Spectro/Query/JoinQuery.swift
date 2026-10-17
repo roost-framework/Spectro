@@ -129,7 +129,7 @@ public struct JoinQueryBuilder<T: Schema, U: Schema>: Sendable {
     public var joined: JoinQueryField<U> { JoinQueryField<U>(tableName: U.tableName) }
 
     public subscript<V>(dynamicMember keyPath: KeyPath<T, V>) -> JoinField<V> {
-        JoinField<V>(tableName: T.tableName, fieldName: extractFieldName(from: keyPath, schema: T.self))
+        JoinField<V>(tableName: T.tableName, fieldName: T.column(for: keyPath))
     }
 }
 
