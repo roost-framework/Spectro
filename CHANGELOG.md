@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.3 — 2026-10-17
+
+- Exclude soft-deleted records of joined tables from `join`, `leftJoin`, `rightJoin`, and `joinThrough`. Only the queried table's soft-delete filter was applied, so joins returned the joined table's soft-deleted records and typed left joins decoded them, while `preload` and lazy relations on the same models excluded them. `.withDeleted()` still includes them. Every release since soft deletes were added in 2.0.0 is affected.
+- Report 2.3.3 from `spectro --version`, pin the Mint installation examples and the Mintfile to 2.3.3, and require 2.3.3 in the package installation examples.
+
+[Full comparison with 2.3.2](https://github.com/roost-framework/Spectro/compare/2.3.2...2.3.3)
+
 ## 2.3.2 — 2026-10-11
 
 - Exclude soft-deleted records from `sum`, `avg`, `min`, `max`, their `grouped` forms, and `select`. These read the query's filters without the automatic soft-delete filter, so `select` returned soft-deleted records' values and aggregates counted them, while `all()` and `count()` on the same query excluded them. `.withDeleted()` still includes them. Every release since soft deletes were added in 2.0.0 is affected.
