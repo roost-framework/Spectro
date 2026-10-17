@@ -3,6 +3,15 @@ import Foundation
 import PostgresKit
 @testable import Spectro
 
+@Schema("renamed_items")
+private struct RenamedItem {
+    @ID var id: UUID
+    @Column("display_name") var name: String = ""
+    @Column("LegacyCode") var code: String = ""
+    @ForeignKey("org_ref") var orgId: UUID
+    @Column var viewCount: Int = 0
+}
+
 @Suite("Query binding order")
 struct QueryBindingTests {
     private actor Recorder: QueryExecutor {
@@ -76,6 +85,32 @@ struct QueryBindingTests {
         #expect(statements.count == 4)
         #expect(statements.prefix(3).allSatisfy { $0.contains(source) })
         #expect(statements.last?.contains(#"INNER JOIN "soft_posts" ON"#) == true)
+    }
+
+    @Test("Builders use the database names given to @Column and @ForeignKey")
+    func columnNameOverrides() async throws {
+        let recorder = Recorder()
+        let base = Query(schema: RenamedItem.self, executor: recorder)
+        _ = try await base.where { $0.name == "a" && $0.code.isNotNull() }.orderBy { $0.orgId }.all()
+        _ = try await base.select { $0.name }.all()
+        _ = try await base.groupBy { $0.code }.groupedSum { $0.viewCount }
+        _ = try await base.join(TestUser.self, on: { $0.left.orgId == $0.right.id })
+            .executeJoin(with: TestUser.self).where { $0.main.name == "a" }.all()
+        let statements = await recorder.statements
+        let sql = statements.joined(separator: "\n")
+        for fragment in [
+            #"("display_name" = $1) AND ("LegacyCode" IS NOT NULL)"#, #"ORDER BY "org_ref""#,
+            #"SELECT "display_name" FROM"#, #"SUM("view_count")"#, #"GROUP BY "LegacyCode""#,
+            #"ON "renamed_items"."org_ref" = "test_users"."id""#, #"("renamed_items"."display_name" = $1)"#,
+        ] {
+            #expect(sql.contains(fragment), "missing \(fragment)")
+        }
+        // The joined test_users table has its own "name" column, so check its statement qualified only.
+        let unjoined = statements.dropLast().joined(separator: "\n")
+        for property in ["name", "code", "legacy_code", "org_id"] {
+            #expect(!unjoined.contains("\"\(property)\""), "property name \(property) used as a column")
+            #expect(!sql.contains("\"renamed_items\".\"\(property)\""), "property name \(property) used as a column")
+        }
     }
 
     @Test("A where clause chained after an OR still constrains every row")

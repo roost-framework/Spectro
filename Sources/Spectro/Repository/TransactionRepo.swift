@@ -6,13 +6,13 @@ import PostgresNIO
 /// All CRUD operations execute on the same database connection that issued `BEGIN`,
 /// guaranteeing atomicity. Created automatically by `GenericDatabaseRepo.transaction()`.
 ///
-/// **Limitations:**
-/// - `query()` (the composable `Query<T>` builder) is **not available** in transactions
-///   because `Query<T>` stores a `DatabaseConnection` reference. Use the direct CRUD
-///   methods (`get`, `all`, `insert`, `update`, `delete`) inside transaction closures.
-/// - Nested transactions are not supported and will throw `SpectroError.transactionAlreadyStarted`.
+/// `query()` builds queries on the same connection, so they run inside the transaction too.
+///
+/// Nested transactions are not supported and throw `SpectroError.transactionAlreadyStarted`.
+/// Use `savepoint(_:)` to roll back part of a transaction without aborting the rest.
 public actor TransactionRepo: Repo {
     private let context: TransactionContext
+    private var savepointCount = 0
 
     init(context: TransactionContext) {
         self.context = context
@@ -327,6 +327,37 @@ public actor TransactionRepo: Repo {
 
     public func transaction<T: Sendable>(_ work: @escaping @Sendable (any Repo) async throws -> T) async throws -> T {
         throw SpectroError.transactionAlreadyStarted
+    }
+
+    // MARK: - Savepoints
+
+    /// Run `body` inside a savepoint of this transaction.
+    ///
+    /// The savepoint is released when `body` returns. When `body` throws, its changes are rolled
+    /// back to the savepoint, the transaction stays usable, and the error is rethrown unchanged.
+    /// Savepoints can nest.
+    /// - Throws: The error `body` threw, or `SpectroError.transactionAndRollbackFailed` if the
+    ///   rollback to the savepoint fails.
+    public func savepoint<T: Sendable>(_ body: @escaping @Sendable (TransactionRepo) async throws -> T) async throws -> T {
+        savepointCount += 1
+        let name = "spectro_sp_\(savepointCount)".quoted
+        try await context.execute("SAVEPOINT \(name)")
+
+        let result: T
+        do {
+            result = try await body(self)
+        } catch {
+            do {
+                try await context.execute("ROLLBACK TO SAVEPOINT \(name)")
+                try await context.execute("RELEASE SAVEPOINT \(name)")
+            } catch let rollbackError {
+                throw SpectroError.transactionAndRollbackFailed(original: error, rollback: rollbackError)
+            }
+            throw error
+        }
+
+        try await context.execute("RELEASE SAVEPOINT \(name)")
+        return result
     }
 
     // MARK: - Private

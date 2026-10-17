@@ -41,7 +41,7 @@ Transactions use `READ COMMITTED` isolation. The closure receives a ``Repo`` bac
 
 Calling a separately captured pooled repository inside the closure performs work outside that transaction. Pass `any Repo` to application functions so they can receive either a pooled repository or the transaction's repository.
 
-Nested transactions are unsupported and throw `SpectroError.transactionAlreadyStarted`. Do not retain the transaction repository or ``TransactionContext`` after the closure returns.
+Nested transactions are unsupported and throw `SpectroError.transactionAlreadyStarted`. To roll back one step without aborting the transaction, call `savepoint(_:)` on the ``TransactionRepo``: it releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Errors that escape the closure come back wrapped in `SpectroError.transactionFailed`; `SpectroError.serverError` returns the underlying PostgreSQL error's SQLSTATE and constraint, or `nil`. Do not retain the transaction repository or ``TransactionContext`` after the closure returns.
 
 ### Shut down cleanly
 

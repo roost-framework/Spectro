@@ -61,19 +61,19 @@ Browse guides and searchable API reference in the [documentation for the latest 
 Add to your `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.4.0")
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.5.0")
 ```
 
 The `CLI`, `RichTerminal`, and `Migrations` traits, on by default, bring the dependencies of the `spectro` command (ArgumentParser, plus Noora for colors, spinners, prompts, and tables) and `SpectroMigrations`. If you only use SpectroKit, disable them so SwiftPM never fetches ArgumentParser or Noora:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.4.0", traits: [])
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.5.0", traits: [])
 ```
 
 To build the `spectro` command from your dependencies without Noora, as Roost does for `roost spectro`, enable only `CLI`; the command then prints plain text:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.4.0", traits: ["CLI"])
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.5.0", traits: ["CLI"])
 ```
 
 Then add `"SpectroKit"` to your target's dependencies:
@@ -92,13 +92,13 @@ Then add `"SpectroKit"` to your target's dependencies:
 The `spectro` CLI is distributed via [Mint](https://github.com/yonaskolb/Mint):
 
 ```bash
-mint install roost-framework/Spectro@2.4.0
+mint install roost-framework/Spectro@2.5.0
 ```
 
 Pin a version in your `Mintfile`:
 
 ```
-roost-framework/Spectro@2.4.0
+roost-framework/Spectro@2.5.0
 ```
 
 For existing applications, read the [2.1 upgrade guide](docs/UPGRADING-2.1.md) and [release notes](CHANGELOG.md). Applications updating from 1.x should also follow the [2.0 upgrade guide](docs/UPGRADING-2.0.md).
@@ -237,6 +237,8 @@ struct User {
     @ForeignKey("team_ref_id") var teamId: UUID     // maps to "team_ref_id" column
 }
 ```
+
+Query builders, inserts, and decoding all use the overridden names. `User.column(for: \.name)` returns the database column for a key path (`"display_name"` here, `"team_ref_id"` for `\.teamId`).
 
 ### Manual schema definition
 
@@ -584,7 +586,25 @@ let (user, profile) = try await spectro.transaction { repo in
 
 Both `GenericDatabaseRepo` and `TransactionRepo` conform to the `Repo` protocol, so code that accepts `any Repo` works transparently inside and outside transactions. The `QueryExecutor` protocol allows `Query<T>` to execute against both pooled connections and pinned transaction connections.
 
-Nested transactions are not supported and will throw `SpectroError.transactionAlreadyStarted`.
+Nested transactions are not supported and will throw `SpectroError.transactionAlreadyStarted`. To recover from a failed step without aborting the whole transaction, run it in a savepoint:
+
+```swift
+try await spectro.transaction { repo in
+    guard let tx = repo as? TransactionRepo else { return }
+    let order = try await tx.insert(Order(total: 42))
+    do {
+        try await tx.savepoint { sp in
+            _ = try await sp.insert(Coupon(code: code, orderId: order.id))
+        }
+    } catch let error as SpectroError where error.serverError?.sqlState == "23505" {
+        // The coupon insert was rolled back; the transaction is still usable.
+    }
+}
+```
+
+`savepoint` releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Savepoints can nest.
+
+Errors a transaction's body throws come back wrapped in `SpectroError.transactionFailed`, and database errors in `queryExecutionFailed`. `SpectroError.serverError` unwraps them and returns the PostgreSQL error's SQLSTATE, message, constraint, table, column, and detail, or `nil` when the server reported none.
 
 ## Aggregates and GROUP BY
 
@@ -1089,7 +1109,7 @@ struct User: Schema, SchemaBuilder {
 SpectroError.transactionAlreadyStarted
 ```
 
-Nested transactions are not supported. Restructure your code so that all work happens within a single `transaction` closure.
+Nested transactions are not supported. Keep all work within a single `transaction` closure, and use `TransactionRepo.savepoint` for steps that must roll back on their own.
 
 ### Connection lifecycle
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.0 — 2026-10-17
+
+- Add `TransactionRepo.savepoint(_:)`. A failed statement aborts the enclosing PostgreSQL transaction, so every later statement failed with SQLSTATE 25P02. `savepoint` releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged, so the transaction stays usable. Savepoints nest. `transaction()` on a `TransactionRepo` still throws `transactionAlreadyStarted`.
+- Add `SpectroError.serverError`, which returns a `DatabaseServerError` with the PostgreSQL error's SQLSTATE, message, constraint, table, column, and detail. It unwraps `transactionFailed`, `transactionAndRollbackFailed`, `queryExecutionFailed`, `invalidSql`, `migrationFailed`, and `connectionFailed`, and reads both PostgresNIO error types. It returns `nil` when the server reported no error.
+- Add `Schema.column(for:)`, which returns the database column for a key path, with the snake_case convention and `@Column` and `@ForeignKey` names applied. Use it instead of `_keyPathToColumn`, which holds Swift property names.
+- Fix query builders ignoring `@Column("x")` and `@ForeignKey("x")` names. Filters, ordering, selection, grouping, aggregates, and join conditions used the snake_cased property name, so with `@Column("display_name") var name`, `.where { $0.name == "a" }` queried a `name` column. Inserts and decoding already used the custom names. Every earlier release is affected.
+- Correct the `TransactionRepo` documentation: `query()` runs inside transactions.
+- Report 2.5.0 from `spectro --version`, pin the Mint installation examples and the Mintfile to 2.5.0, and require 2.5.0 in the package installation examples.
+
+[Full comparison with 2.4.0](https://github.com/roost-framework/Spectro/compare/2.4.0...2.5.0)
+
 ## 2.4.0 — 2026-10-17
 
 - Add `restore(_:id:)` to `Repo`. It clears a soft-deleted record's deletion timestamp and returns the record, returns a record that is not deleted unchanged, and throws `SpectroError.notFound` for an unknown id.
