@@ -122,6 +122,50 @@ struct SoftDeleteTests {
         }
     }
 
+    private static func expectNotFound(_ path: String, _ body: () async throws -> Void) async {
+        do {
+            try await body()
+            Issue.record("Expected SpectroError.notFound from \(path)")
+        } catch let error as SpectroError {
+            guard case .notFound = error else {
+                Issue.record("Expected SpectroError.notFound from \(path) but got: \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected SpectroError.notFound from \(path) but got: \(error)")
+        }
+    }
+
+    @Test("update() treats a soft-deleted record as not found and leaves it unchanged")
+    func updateIgnoresSoftDeleted() async throws {
+        try await withCleanTable { repo in
+            let active = try await repo.insert(SoftUser(name: "Kim", email: "kim@test.com"))
+            let removed = try await repo.insert(SoftUser(name: "Lee", email: "lee@test.com"))
+            try await repo.delete(SoftUser.self, id: removed.id)
+
+            await Self.expectNotFound("update") {
+                _ = try await repo.update(SoftUser.self, id: removed.id, changes: ["name": "Changed"])
+            }
+            await Self.expectNotFound("changeset update") {
+                _ = try await repo.update(Changeset.cast(removed, params: ["name": "Changed"], permitted: ["name"]))
+            }
+            try await repo.transaction { transaction in
+                await Self.expectNotFound("transaction update") {
+                    _ = try await transaction.update(SoftUser.self, id: removed.id, changes: ["name": "Changed"])
+                }
+                await Self.expectNotFound("transaction changeset update") {
+                    _ = try await transaction.update(Changeset.cast(removed, params: ["name": "Changed"], permitted: ["name"]))
+                }
+            }
+
+            let stored = try await repo.query(SoftUser.self).withDeleted().where { $0.id == removed.id }.first()
+            #expect(stored?.name == "Lee")
+            #expect(stored?.deletedAt != nil)
+            let updated = try await repo.update(SoftUser.self, id: active.id, changes: ["name": "Kimberly"])
+            #expect(updated.name == "Kimberly")
+        }
+    }
+
     @Test("all() excludes soft-deleted records")
     func allExcludesSoftDeleted() async throws {
         try await withCleanTable { repo in
