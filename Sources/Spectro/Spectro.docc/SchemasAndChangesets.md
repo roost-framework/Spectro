@@ -21,7 +21,7 @@ struct User {
 }
 ```
 
-``ID`` supports ``PrimaryKeyType`` values such as `UUID`, `Int`, and `String`. ``Column`` maps a stored field and optionally overrides its database name. ``Timestamp`` holds a date field. The schema macro preserves those mappings when building rows and encoding JSON.
+``ID`` supports ``PrimaryKeyType`` values such as `UUID`, `Int`, and `String`. ``Column`` maps a stored field and optionally overrides its database name, which query builders, inserts, and decoding all use; `column(for:)` returns a key path's database column. ``Timestamp`` holds a date field. The schema macro preserves those mappings when building rows and encoding JSON.
 
 ``SoftDelete`` opts the model into deletion timestamps and default filtering. Add the corresponding nullable database column through a migration. Queries exclude soft-deleted rows by default, including rows of joined tables, and `update` treats them as missing. `.withDeleted()` and `get(_:id:withDeleted:)` include them, and `restore(_:id:)` clears the deletion timestamp. Schema declarations describe models, while migrations own the database's historical structure.
 

@@ -238,6 +238,8 @@ struct User {
 }
 ```
 
+Query builders, inserts, and decoding all use the overridden names. `User.column(for: \.name)` returns the database column for a key path (`"display_name"` here, `"team_ref_id"` for `\.teamId`).
+
 ### Manual schema definition
 
 If you prefer not to use the macro, implement `Schema` and `SchemaBuilder` manually:
@@ -584,7 +586,25 @@ let (user, profile) = try await spectro.transaction { repo in
 
 Both `GenericDatabaseRepo` and `TransactionRepo` conform to the `Repo` protocol, so code that accepts `any Repo` works transparently inside and outside transactions. The `QueryExecutor` protocol allows `Query<T>` to execute against both pooled connections and pinned transaction connections.
 
-Nested transactions are not supported and will throw `SpectroError.transactionAlreadyStarted`.
+Nested transactions are not supported and will throw `SpectroError.transactionAlreadyStarted`. To recover from a failed step without aborting the whole transaction, run it in a savepoint:
+
+```swift
+try await spectro.transaction { repo in
+    guard let tx = repo as? TransactionRepo else { return }
+    let order = try await tx.insert(Order(total: 42))
+    do {
+        try await tx.savepoint { sp in
+            _ = try await sp.insert(Coupon(code: code, orderId: order.id))
+        }
+    } catch let error as SpectroError where error.serverError?.sqlState == "23505" {
+        // The coupon insert was rolled back; the transaction is still usable.
+    }
+}
+```
+
+`savepoint` releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Savepoints can nest.
+
+Errors a transaction's body throws come back wrapped in `SpectroError.transactionFailed`, and database errors in `queryExecutionFailed`. `SpectroError.serverError` unwraps them and returns the PostgreSQL error's SQLSTATE, message, constraint, table, column, and detail, or `nil` when the server reported none.
 
 ## Aggregates and GROUP BY
 
@@ -1089,7 +1109,7 @@ struct User: Schema, SchemaBuilder {
 SpectroError.transactionAlreadyStarted
 ```
 
-Nested transactions are not supported. Restructure your code so that all work happens within a single `transaction` closure.
+Nested transactions are not supported. Keep all work within a single `transaction` closure, and use `TransactionRepo.savepoint` for steps that must roll back on their own.
 
 ### Connection lifecycle
 
