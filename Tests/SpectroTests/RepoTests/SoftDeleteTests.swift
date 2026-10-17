@@ -271,5 +271,80 @@ struct SoftDeleteTests {
             #expect(fetched == nil)
         }
     }
+
+    @Test("restore() clears deleted_at so normal reads return the record again")
+    func restoreClearsDeletedAt() async throws {
+        try await withCleanTable { repo in
+            let user = try await repo.insert(SoftUser(name: "Kim", email: "kim@test.com"))
+            try await repo.delete(SoftUser.self, id: user.id)
+
+            let restored = try await repo.restore(SoftUser.self, id: user.id)
+            #expect(restored.id == user.id)
+            #expect(restored.deletedAt == nil)
+            let fetched = try await repo.get(SoftUser.self, id: user.id)
+            #expect(fetched?.name == "Kim")
+            #expect(fetched?.deletedAt == nil)
+        }
+    }
+
+    @Test("restore() runs on the transaction connection")
+    func restoreInsideTransaction() async throws {
+        try await withCleanTable { repo in
+            let user = try await repo.insert(SoftUser(name: "Lou", email: "lou@test.com"))
+            try await repo.delete(SoftUser.self, id: user.id)
+
+            try await repo.transaction { transaction in
+                let restored = try await transaction.restore(SoftUser.self, id: user.id)
+                #expect(restored.deletedAt == nil)
+                #expect(try await transaction.get(SoftUser.self, id: user.id) != nil)
+            }
+            #expect(try await repo.get(SoftUser.self, id: user.id) != nil)
+        }
+    }
+
+    @Test("restore() returns a record that is not deleted unchanged")
+    func restoreActiveRecord() async throws {
+        try await withCleanTable { repo in
+            let user = try await repo.insert(SoftUser(name: "Max", email: "max@test.com"))
+
+            let restored = try await repo.restore(SoftUser.self, id: user.id)
+            #expect(restored.id == user.id)
+            #expect(restored.name == "Max")
+            #expect(restored.deletedAt == nil)
+        }
+    }
+
+    @Test("restore() throws notFound for an unknown id")
+    func restoreUnknownIDThrows() async throws {
+        try await withCleanTable { repo in
+            do {
+                _ = try await repo.restore(SoftUser.self, id: UUID())
+                Issue.record("Expected SpectroError.notFound")
+            } catch let error as SpectroError {
+                guard case .notFound(let schema, _) = error else {
+                    Issue.record("Wrong error: \(error)")
+                    return
+                }
+                #expect(schema == SoftUser.tableName)
+            }
+        }
+    }
+
+    @Test("restore() throws invalidSchema for a schema without soft delete")
+    func restoreHardDeleteSchemaThrows() async throws {
+        try await withHardDeleteTable { repo in
+            let user = try await repo.insert(TestUser(name: "Ned", email: "ned@test.com", age: 40))
+            do {
+                _ = try await repo.restore(TestUser.self, id: user.id)
+                Issue.record("Expected SpectroError.invalidSchema")
+            } catch let error as SpectroError {
+                guard case .invalidSchema(let reason) = error else {
+                    Issue.record("Wrong error: \(error)")
+                    return
+                }
+                #expect(reason.contains("soft-delete"))
+            }
+        }
+    }
 }
 }

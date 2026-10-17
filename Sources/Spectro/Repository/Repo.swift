@@ -53,4 +53,31 @@ extension Repo {
         try await executeRawQuery(sql: sql, parameters: [])
     }
 
+    /// Clear a soft-deleted record's deletion timestamp and return the record.
+    ///
+    /// Restoring a record that is not deleted returns it unchanged.
+    /// - Throws: `SpectroError.notFound` for an unknown id, and `SpectroError.invalidSchema`
+    ///   for a schema without a primary key or soft-delete column.
+    public func restore<T: Schema>(_ schema: T.Type, id: some PrimaryKeyType) async throws -> T {
+        let metadata = await SchemaRegistry.shared.register(schema)
+
+        guard let primaryKey = metadata.primaryKeyField else {
+            throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no primary key field")
+        }
+        guard let sdf = metadata.softDeleteField else {
+            throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no soft-delete column to restore")
+        }
+
+        let sql = """
+            UPDATE \(metadata.tableName.quoted)
+            SET \(sdf.quoted) = NULL
+            WHERE \(primaryKey.snakeCase().quoted) = $1
+            RETURNING *
+            """
+        guard let row = try await executeRawQuery(sql: sql, parameters: [id.toPostgresData()]).first else {
+            throw SpectroError.notFound(schema: metadata.tableName, id: String(describing: id))
+        }
+        return try await T.from(row: row)
+    }
+
 }
