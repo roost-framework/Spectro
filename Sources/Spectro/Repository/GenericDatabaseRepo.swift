@@ -238,10 +238,14 @@ public actor GenericDatabaseRepo: Repo {
 
         values.append(id.toPostgresData())
 
+        var whereClause = "\(primaryKey.snakeCase().quoted) = $\(paramIndex)"
+        // A soft-deleted record is absent here, as in get().
+        if let sdf = metadata.softDeleteField { whereClause += " AND \(sdf.quoted) IS NULL" }
+
         let sql = """
             UPDATE \(metadata.tableName.quoted)
             SET \(setClause.joined(separator: ", "))
-            WHERE \(primaryKey.snakeCase().quoted) = $\(paramIndex)
+            WHERE \(whereClause)
             RETURNING *
             """
 
@@ -252,7 +256,7 @@ public actor GenericDatabaseRepo: Repo {
         )
 
         guard let row = rows.first else {
-            throw SpectroError.databaseError(reason: "Update did not return a row")
+            throw SpectroError.notFound(schema: metadata.tableName, id: String(describing: id))
         }
 
         return try await mapRowToSchema(row, schema: schema)

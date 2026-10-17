@@ -20,6 +20,23 @@ public protocol Repo: Sendable {
 }
 
 extension Repo {
+    /// Fetch a record by primary key. When `withDeleted` is true, soft-deleted records are
+    /// returned too, as with `Query.withDeleted()`.
+    public func get<T: Schema>(_ schema: T.Type, id: some PrimaryKeyType, withDeleted: Bool) async throws -> T? {
+        guard withDeleted else { return try await get(schema, id: id) }
+
+        let metadata = await SchemaRegistry.shared.register(schema)
+        guard let primaryKey = metadata.primaryKeyField else {
+            throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no primary key field")
+        }
+
+        let condition = QueryCondition(
+            sql: "\(primaryKey.snakeCase().quoted) = ?",
+            parameters: [id.toPostgresData()]
+        )
+        return try await query(schema).withDeleted().where { _ in condition }.first()
+    }
+
     public func insert<T: Schema>(_ instance: T) async throws -> T {
         try await insert(instance, includePrimaryKey: false)
     }
@@ -34,6 +51,33 @@ extension Repo {
 
     public func executeRawQuery(sql: String) async throws -> [PostgresRow] {
         try await executeRawQuery(sql: sql, parameters: [])
+    }
+
+    /// Clear a soft-deleted record's deletion timestamp and return the record.
+    ///
+    /// Restoring a record that is not deleted returns it unchanged.
+    /// - Throws: `SpectroError.notFound` for an unknown id, and `SpectroError.invalidSchema`
+    ///   for a schema without a primary key or soft-delete column.
+    public func restore<T: Schema>(_ schema: T.Type, id: some PrimaryKeyType) async throws -> T {
+        let metadata = await SchemaRegistry.shared.register(schema)
+
+        guard let primaryKey = metadata.primaryKeyField else {
+            throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no primary key field")
+        }
+        guard let sdf = metadata.softDeleteField else {
+            throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no soft-delete column to restore")
+        }
+
+        let sql = """
+            UPDATE \(metadata.tableName.quoted)
+            SET \(sdf.quoted) = NULL
+            WHERE \(primaryKey.snakeCase().quoted) = $1
+            RETURNING *
+            """
+        guard let row = try await executeRawQuery(sql: sql, parameters: [id.toPostgresData()]).first else {
+            throw SpectroError.notFound(schema: metadata.tableName, id: String(describing: id))
+        }
+        return try await T.from(row: row)
     }
 
 }

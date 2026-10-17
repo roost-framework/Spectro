@@ -61,19 +61,19 @@ Browse guides and searchable API reference in the [documentation for the latest 
 Add to your `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.3.3")
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.4.0")
 ```
 
 The `CLI`, `RichTerminal`, and `Migrations` traits, on by default, bring the dependencies of the `spectro` command (ArgumentParser, plus Noora for colors, spinners, prompts, and tables) and `SpectroMigrations`. If you only use SpectroKit, disable them so SwiftPM never fetches ArgumentParser or Noora:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.3.3", traits: [])
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.4.0", traits: [])
 ```
 
 To build the `spectro` command from your dependencies without Noora, as Roost does for `roost spectro`, enable only `CLI`; the command then prints plain text:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.3.3", traits: ["CLI"])
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.4.0", traits: ["CLI"])
 ```
 
 Then add `"SpectroKit"` to your target's dependencies:
@@ -92,13 +92,13 @@ Then add `"SpectroKit"` to your target's dependencies:
 The `spectro` CLI is distributed via [Mint](https://github.com/yonaskolb/Mint):
 
 ```bash
-mint install roost-framework/Spectro@2.3.3
+mint install roost-framework/Spectro@2.4.0
 ```
 
 Pin a version in your `Mintfile`:
 
 ```
-roost-framework/Spectro@2.3.3
+roost-framework/Spectro@2.4.0
 ```
 
 For existing applications, read the [2.1 upgrade guide](docs/UPGRADING-2.1.md) and [release notes](CHANGELOG.md). Applications updating from 1.x should also follow the [2.0 upgrade guide](docs/UPGRADING-2.0.md).
@@ -194,7 +194,7 @@ struct User {
 | `@BelongsTo<T>` | Inverse of HasMany/HasOne | `@BelongsTo var user: User?` |
 | `@ManyToMany<T>` | Many-to-many via junction table | `@ManyToMany(junctionTable: "user_tags") var tags: [Tag]` |
 
-Add `@SoftDelete var deletedAt: Date?` and a matching nullable `TIMESTAMPTZ` database column to opt into soft deletes. `@Schema` generates the filtering metadata and timestamp mapping. `repo.delete` records the deletion time; normal reads and joins exclude deleted records, while `repo.query(User.self).withDeleted()` includes them. For manual schemas, implement `softDeleteColumn` with the database column name and decode the timestamp in `build(from:)`.
+Add `@SoftDelete var deletedAt: Date?` and a matching nullable `TIMESTAMPTZ` database column to opt into soft deletes. `@Schema` generates the filtering metadata and timestamp mapping. `repo.delete` records the deletion time; normal reads and joins exclude deleted records, and `update` treats them as missing. `repo.query(User.self).withDeleted()` and `repo.get(User.self, id: id, withDeleted: true)` include them, and `repo.restore(User.self, id: id)` clears the deletion time. For manual schemas, implement `softDeleteColumn` with the database column name and decode the timestamp in `build(from:)`.
 
 ### Generic primary keys
 

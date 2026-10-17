@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.0 — 2026-10-17
+
+- Add `restore(_:id:)` to `Repo`. It clears a soft-deleted record's deletion timestamp and returns the record, returns a record that is not deleted unchanged, and throws `SpectroError.notFound` for an unknown id.
+- Add `get(_:id:withDeleted:)` to `Repo`. With `withDeleted: true` it returns soft-deleted records too, like `Query.withDeleted()`. Both additions are protocol extensions, so custom `Repo` conformances keep compiling.
+- `update(_:id:changes:)` and changeset updates now treat soft-deleted records as missing, as `get` does. They modified soft-deleted records and returned them as if they were active. An update that matches no record now throws `SpectroError.notFound` instead of `SpectroError.databaseError`. If you revive records by setting their deletion timestamp to `nil` through `update`, call `restore` instead.
+- Report 2.4.0 from `spectro --version`, pin the Mint installation examples and the Mintfile to 2.4.0, and require 2.4.0 in the package installation examples.
+
+[Full comparison with 2.3.3](https://github.com/roost-framework/Spectro/compare/2.3.3...2.4.0)
+
 ## 2.3.3 — 2026-10-17
 
 - Exclude soft-deleted records of joined tables from `join`, `leftJoin`, `rightJoin`, and `joinThrough`. Only the queried table's soft-delete filter was applied, so joins returned the joined table's soft-deleted records and typed left joins decoded them, while `preload` and lazy relations on the same models excluded them. `.withDeleted()` still includes them. Every release since soft deletes were added in 2.0.0 is affected.

@@ -73,6 +73,21 @@ struct RepositoryTests {
         }
     }
 
+    @Test("Update of a missing ID throws notFound")
+    func updateMissingThrowsNotFound() async throws {
+        try await withCleanTable { repo in
+            do {
+                _ = try await repo.update(TestUser.self, id: UUID(), changes: ["name": "Nobody"])
+                Issue.record("Expected SpectroError.notFound to be thrown")
+            } catch let error as SpectroError {
+                guard case .notFound = error else {
+                    Issue.record("Expected SpectroError.notFound but got: \(error)")
+                    return
+                }
+            }
+        }
+    }
+
     @Test("Delete removes a row")
     func deleteRow() async throws {
         try await withCleanTable { repo in
