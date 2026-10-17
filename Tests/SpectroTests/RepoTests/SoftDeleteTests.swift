@@ -151,6 +151,22 @@ struct SoftDeleteTests {
         }
     }
 
+    @Test("Grouped counts and selected fields exclude soft-deleted records")
+    func aggregatesAndSelectExcludeSoftDeleted() async throws {
+        try await withCleanTable { repo in
+            let _ = try await repo.insert(SoftUser(name: "Ivy", email: "ivy@test.com"))
+            let toDelete = try await repo.insert(SoftUser(name: "Jack", email: "jack@test.com"))
+            try await repo.delete(SoftUser.self, id: toDelete.id)
+
+            let names = try await repo.query(SoftUser.self).select { $0.name }.all()
+            let groups = try await repo.query(SoftUser.self).groupBy { $0.name }.groupedCount()
+            let allNames = try await repo.query(SoftUser.self).withDeleted().select { $0.name }.all()
+            #expect(names == ["Ivy"])
+            #expect(groups.map { $0.group["name"] } == ["Ivy"])
+            #expect(Set(allNames) == ["Ivy", "Jack"])
+        }
+    }
+
     @Test("withDeleted() returns all records including soft-deleted")
     func withDeletedIncludesAll() async throws {
         try await withCleanTable { repo in
