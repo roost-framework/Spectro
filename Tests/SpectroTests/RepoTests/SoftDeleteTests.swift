@@ -146,6 +146,31 @@ struct SoftDeleteTests {
         }
     }
 
+    @Test("get(withDeleted: true) returns soft-deleted records, inside transactions too")
+    func getWithDeletedIncludesSoftDeleted() async throws {
+        try await withCleanTable { repo in
+            let active = try await repo.insert(SoftUser(name: "Ada", email: "ada@test.com"))
+            let removed = try await repo.insert(SoftUser(name: "Ben", email: "ben@test.com"))
+            try await repo.delete(SoftUser.self, id: removed.id)
+
+            #expect(try await repo.get(SoftUser.self, id: removed.id, withDeleted: false) == nil)
+            let fetched = try await repo.get(SoftUser.self, id: removed.id, withDeleted: true)
+            #expect(fetched?.name == "Ben")
+            #expect(fetched?.deletedAt != nil)
+            #expect(try await repo.get(SoftUser.self, id: active.id, withDeleted: false)?.name == "Ada")
+            #expect(try await repo.get(SoftUser.self, id: active.id, withDeleted: true)?.name == "Ada")
+            #expect(try await repo.get(SoftUser.self, id: UUID(), withDeleted: true) == nil)
+
+            try await repo.transaction { transaction in
+                #expect(try await transaction.get(SoftUser.self, id: removed.id, withDeleted: false) == nil)
+                let fetched = try await transaction.get(SoftUser.self, id: removed.id, withDeleted: true)
+                #expect(fetched?.deletedAt != nil)
+                #expect(try await transaction.get(SoftUser.self, id: active.id, withDeleted: true)?.name == "Ada")
+                #expect(try await transaction.get(SoftUser.self, id: UUID(), withDeleted: true) == nil)
+            }
+        }
+    }
+
     @Test("Query excludes soft-deleted records automatically")
     func queryExcludesSoftDeleted() async throws {
         try await withCleanTable { repo in

@@ -20,6 +20,23 @@ public protocol Repo: Sendable {
 }
 
 extension Repo {
+    /// Fetch a record by primary key. When `withDeleted` is true, soft-deleted records are
+    /// returned too, as with `Query.withDeleted()`.
+    public func get<T: Schema>(_ schema: T.Type, id: some PrimaryKeyType, withDeleted: Bool) async throws -> T? {
+        guard withDeleted else { return try await get(schema, id: id) }
+
+        let metadata = await SchemaRegistry.shared.register(schema)
+        guard let primaryKey = metadata.primaryKeyField else {
+            throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no primary key field")
+        }
+
+        let condition = QueryCondition(
+            sql: "\(primaryKey.snakeCase().quoted) = ?",
+            parameters: [id.toPostgresData()]
+        )
+        return try await query(schema).withDeleted().where { _ in condition }.first()
+    }
+
     public func insert<T: Schema>(_ instance: T) async throws -> T {
         try await insert(instance, includePrimaryKey: false)
     }
