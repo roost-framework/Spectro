@@ -37,7 +37,7 @@ public struct Query<T: Schema>: Sendable {
         self.executor = executor
     }
 
-    /// Bypass the automatic soft-delete filter, returning all records including soft-deleted ones.
+    /// Bypass the automatic soft-delete filter on the queried and joined tables, returning all records including soft-deleted ones.
     public func withDeleted() -> Query<T> {
         var copy = self
         copy.includeSoftDeleted = true
@@ -74,6 +74,7 @@ public struct Query<T: Schema>: Sendable {
         copy.joins.append(JoinClause(
             type: .inner,
             table: joinSchema.tableName,
+            softDeleteColumn: U.softDeleteColumn,
             condition: joinCondition.sql,
             parameters: joinCondition.parameters
         ))
@@ -90,6 +91,7 @@ public struct Query<T: Schema>: Sendable {
         copy.joins.append(JoinClause(
             type: .left,
             table: joinSchema.tableName,
+            softDeleteColumn: U.softDeleteColumn,
             condition: joinCondition.sql,
             parameters: joinCondition.parameters
         ))
@@ -106,6 +108,7 @@ public struct Query<T: Schema>: Sendable {
         copy.joins.append(JoinClause(
             type: .right,
             table: joinSchema.tableName,
+            softDeleteColumn: U.softDeleteColumn,
             condition: joinCondition.sql,
             parameters: joinCondition.parameters
         ))
@@ -124,6 +127,7 @@ public struct Query<T: Schema>: Sendable {
         copy.joins.append(JoinClause(
             type: .inner,
             table: junctionSchema.tableName,
+            softDeleteColumn: Junction.softDeleteColumn,
             condition: firstJoin.sql,
             parameters: firstJoin.parameters
         ))
@@ -131,6 +135,7 @@ public struct Query<T: Schema>: Sendable {
         copy.joins.append(JoinClause(
             type: .inner,
             table: targetSchema.tableName,
+            softDeleteColumn: U.softDeleteColumn,
             condition: secondJoin.sql,
             parameters: secondJoin.parameters
         ))
@@ -524,8 +529,15 @@ public struct Query<T: Schema>: Sendable {
 
     internal func buildJoinClause() -> String {
         guard !joins.isEmpty else { return "" }
-        return joins.map { "\($0.type.sql) \($0.table.quoted) ON \($0.condition)" }
-            .joined(separator: " ")
+        return joins.map { join in
+            let table = join.table.quoted
+            // Joining the filtered rows under the table's own name hides soft-deleted rows
+            // for every join type; a filter in ON is wrong for a right join, in WHERE for a left.
+            guard let sdf = join.softDeleteColumn, !includeSoftDeleted else {
+                return "\(join.type.sql) \(table) ON \(join.condition)"
+            }
+            return "\(join.type.sql) (SELECT * FROM \(table) WHERE \(sdf.quoted) IS NULL) AS \(table) ON \(join.condition)"
+        }.joined(separator: " ")
     }
 
     internal func buildOrderClause() -> String {
@@ -940,6 +952,7 @@ internal struct OrderByClause: Sendable {
 internal struct JoinClause: Sendable {
     let type: JoinType
     let table: String
+    let softDeleteColumn: String?
     let condition: String
     let parameters: [PostgresData]
 }

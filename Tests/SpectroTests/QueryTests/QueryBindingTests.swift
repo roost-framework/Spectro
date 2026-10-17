@@ -62,6 +62,22 @@ struct QueryBindingTests {
         #expect(await recorder.statements.first?.contains("WHERE \"\(SoftUser.tableName)\".\"deleted_at\" IS NULL") == true)
     }
 
+    @Test("Joined tables exclude their soft-deleted rows unless withDeleted")
+    func softDeleteJoinedTable() async throws {
+        let recorder = Recorder()
+        let base = Query(schema: TestUser.self, executor: recorder)
+        let on: (JoinBuilder<TestUser, SoftPost>) -> QueryCondition = { _ in QueryCondition(sql: "TRUE") }
+        _ = try await base.join(SoftPost.self, on: on).count()
+        _ = try await base.leftJoin(SoftPost.self, on: on).count()
+        _ = try await base.rightJoin(SoftPost.self, on: on).count()
+        _ = try await base.join(SoftPost.self, on: on).withDeleted().count()
+        let statements = await recorder.statements
+        let source = #"(SELECT * FROM "soft_posts" WHERE "deleted_at" IS NULL) AS "soft_posts" ON"#
+        #expect(statements.count == 4)
+        #expect(statements.prefix(3).allSatisfy { $0.contains(source) })
+        #expect(statements.last?.contains(#"INNER JOIN "soft_posts" ON"#) == true)
+    }
+
     @Test("A where clause chained after an OR still constrains every row")
     func chainedWhereAfterOr() async throws {
         let recorder = Recorder()

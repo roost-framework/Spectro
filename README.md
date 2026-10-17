@@ -194,7 +194,7 @@ struct User {
 | `@BelongsTo<T>` | Inverse of HasMany/HasOne | `@BelongsTo var user: User?` |
 | `@ManyToMany<T>` | Many-to-many via junction table | `@ManyToMany(junctionTable: "user_tags") var tags: [Tag]` |
 
-Add `@SoftDelete var deletedAt: Date?` and a matching nullable `TIMESTAMPTZ` database column to opt into soft deletes. `@Schema` generates the filtering metadata and timestamp mapping. `repo.delete` records the deletion time; normal reads exclude deleted records, while `repo.query(User.self).withDeleted()` includes them. For manual schemas, implement `softDeleteColumn` with the database column name and decode the timestamp in `build(from:)`.
+Add `@SoftDelete var deletedAt: Date?` and a matching nullable `TIMESTAMPTZ` database column to opt into soft deletes. `@Schema` generates the filtering metadata and timestamp mapping. `repo.delete` records the deletion time; normal reads and joins exclude deleted records, while `repo.query(User.self).withDeleted()` includes them. For manual schemas, implement `softDeleteColumn` with the database column name and decode the timestamp in `build(from:)`.
 
 ### Generic primary keys
 

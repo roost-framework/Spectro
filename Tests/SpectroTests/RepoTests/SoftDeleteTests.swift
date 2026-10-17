@@ -16,6 +16,14 @@ private struct MacroSoftOverride {
     @SoftDelete var removedAt: Date?
 }
 
+@Schema("soft_notes")
+private struct SoftNote {
+    @ID var id: UUID
+    @ForeignKey var userId: UUID
+    @Column var body: String
+    @SoftDelete var deletedAt: Date?
+}
+
 extension DatabaseIntegrationTests {
 @Suite("Soft Delete")
 struct SoftDeleteTests {
@@ -164,6 +172,42 @@ struct SoftDeleteTests {
             #expect(names == ["Ivy"])
             #expect(groups.map { $0.group["name"] } == ["Ivy"])
             #expect(Set(allNames) == ["Ivy", "Jack"])
+        }
+    }
+
+    @Test("Joins exclude soft-deleted rows of the joined table unless withDeleted")
+    func joinsExcludeSoftDeletedJoinedRows() async throws {
+        try await withCleanTable { repo in
+            try await repo.executeRawSQL("""
+                CREATE TABLE IF NOT EXISTS "soft_notes" (
+                    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    "user_id" UUID NOT NULL,
+                    "body" TEXT NOT NULL DEFAULT '',
+                    "deleted_at" TIMESTAMPTZ
+                )
+            """)
+            try await repo.executeRawSQL(#"TRUNCATE "soft_notes""#)
+            let ann = try await repo.insert(SoftUser(name: "Ann", email: "ann@test.com"))
+            let bob = try await repo.insert(SoftUser(name: "Bob", email: "bob@test.com"))
+            _ = try await repo.insert(SoftNote(userId: ann.id, body: "kept"))
+            for (user, body) in [(ann, "removed"), (bob, "removed")] {
+                let note = try await repo.insert(SoftNote(userId: user.id, body: body))
+                try await repo.delete(SoftNote.self, id: note.id)
+            }
+
+            func pairs(_ rows: [(SoftUser, SoftNote?)]) -> [String] {
+                rows.map { "\($0.0.name):\($0.1?.body ?? "-")" }.sorted()
+            }
+            let query = repo.query(SoftUser.self)
+            let inner = try await query.joinAndExecute(SoftNote.self, on: { $0.left.id == $0.right.userId })
+            let left = try await query.leftJoinAndExecute(SoftNote.self, on: { $0.left.id == $0.right.userId })
+            let right = try await query.rightJoin(SoftNote.self, on: { $0.left.id == $0.right.userId }).count()
+            let all = try await query.join(SoftNote.self, on: { $0.left.id == $0.right.userId })
+                .withDeleted().executeJoin(with: SoftNote.self).all()
+            #expect(pairs(inner) == ["Ann:kept"])
+            #expect(pairs(left) == ["Ann:kept", "Bob:-"])
+            #expect(right == 1)
+            #expect(pairs(all) == ["Ann:kept", "Ann:removed", "Bob:removed"])
         }
     }
 
