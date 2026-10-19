@@ -118,5 +118,46 @@ extension DatabaseIntegrationTests {
                 }
             }
         }
+
+        @Test("Releasing a savepoint does not commit independently of its transaction")
+        func outerTransactionRollback() async throws {
+            try await withCleanTable { repo in
+                do {
+                    try await repo.transaction { transaction -> Void in
+                        let tx = try #require(transaction as? TransactionRepo)
+                        try await tx.savepoint { sp -> Void in
+                            _ = try await sp.insert(SavepointItem(name: "temporary"))
+                        }
+                        #expect(try await tx.query(SavepointItem.self).count() == 1)
+                        throw Rejected()
+                    }
+                    Issue.record("Expected the transaction to fail")
+                } catch let error as SpectroError {
+                    guard case .transactionFailed(let underlying) = error else { throw error }
+                    #expect(underlying is Rejected)
+                }
+                #expect(try await names(repo).isEmpty)
+            }
+        }
+
+        @Test("An outer savepoint rollback also undoes a released inner savepoint")
+        func outerSavepointRollback() async throws {
+            try await withCleanTable { repo in
+                try await repo.transaction { transaction in
+                    let tx = try #require(transaction as? TransactionRepo)
+                    await #expect(throws: Rejected.self) {
+                        try await tx.savepoint { outer -> Void in
+                            try await outer.savepoint { inner -> Void in
+                                _ = try await inner.insert(SavepointItem(name: "temporary"))
+                            }
+                            throw Rejected()
+                        }
+                    }
+                    #expect(try await tx.query(SavepointItem.self).count() == 0)
+                    _ = try await tx.insert(SavepointItem(name: "kept"))
+                }
+                #expect(try await names(repo) == ["kept"])
+            }
+        }
     }
 }

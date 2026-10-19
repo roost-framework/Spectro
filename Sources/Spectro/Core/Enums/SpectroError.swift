@@ -21,6 +21,9 @@ public enum SpectroError: Error, Sendable {
     /// `value` is the pre-formatted string description of the invalid field value.
     case invalidData(field: String, value: String?, reason: String)
     case validationError(field: String, errors: [String])
+    /// Structured field errors from a declared database constraint. The original write error
+    /// remains available through `underlying` and `serverError`.
+    case changesetFailed(errors: ChangesetErrors, underlying: any Error & Sendable)
     case constraintViolation(String)
     case databaseError(reason: String)
 
@@ -84,6 +87,11 @@ extension SpectroError: LocalizedError {
             return "Invalid data for field '\(field)' with value '\(value ?? "nil")': \(reason)"
         case .validationError(let field, let errors):
             return "Validation failed for field '\(field)': \(errors.joined(separator: ", "))"
+        case .changesetFailed(let errors, _):
+            let messages = errors.errors.keys.sorted().flatMap { field in
+                errors.errors[field, default: []].map { "\(field) \($0)" }
+            }
+            return "Changeset failed: \(messages.joined(separator: ", "))"
         case .constraintViolation(let message):
             return "Database constraint violation: \(message)"
         case .databaseError(let reason):
@@ -144,7 +152,7 @@ extension SpectroError: LocalizedError {
             return "Verify hostname, port, username, password, and database name"
         case .notFound:
             return "Verify the ID exists in the database"
-        case .validationError:
+        case .validationError, .changesetFailed:
             return "Check field requirements and constraints"
         case .transactionDeadlock:
             return "Retry the operation after a brief delay"

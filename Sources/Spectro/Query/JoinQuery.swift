@@ -16,13 +16,13 @@ public struct JoinQuery<T: Schema, U: Schema>: Sendable {
 
     /// Execute join query and return tuples of (main, joined) records
     public func all() async throws -> [(T, U?)] {
-        let main = JoinedProjection<T>(prefix: "__spectro_left")
-        let joined = JoinedProjection<U>(prefix: "__spectro_right")
-        let sql = baseQuery.buildSQL(selectClause: main.selection + ", " + joined.selection)
+        let context = try inspectionContext()
+        let main = JoinedProjection<T>(prefix: "__spectro_left", tableName: T.tableName)
+        let joined = JoinedProjection<U>(prefix: "__spectro_right", tableName: joinClause.identifier)
 
         return try await baseQuery.executor.executeQuery(
-            sql: sql,
-            parameters: baseQuery.parameters,
+            sql: context.sql,
+            parameters: context.parameters,
             resultMapper: { row in
                 let columns = row.makeRandomAccess()
                 let mainRecord = try main.decode(columns)
@@ -33,6 +33,14 @@ public struct JoinQuery<T: Schema, U: Schema>: Sendable {
         )
     }
 
+    internal func inspectionContext() throws -> (sql: String, parameters: [PostgresData], executor: any QueryExecutor) {
+        try baseQuery.validateJoins()
+        let main = JoinedProjection<T>(prefix: "__spectro_left", tableName: T.tableName)
+        let joined = JoinedProjection<U>(prefix: "__spectro_right", tableName: joinClause.identifier)
+        let sql = baseQuery.buildSQL(selectClause: main.selection + ", " + joined.selection)
+        return (sql, baseQuery.parameters, baseQuery.executor)
+    }
+
     /// Execute query and return first result
     public func first() async throws -> (T, U?)? {
         try await limit(1).all().first
@@ -40,7 +48,7 @@ public struct JoinQuery<T: Schema, U: Schema>: Sendable {
 
     /// Add where conditions to the join query
     public func `where`(_ condition: (JoinQueryBuilder<T, U>) -> QueryCondition) -> JoinQuery<T, U> {
-        let builder = JoinQueryBuilder<T, U>()
+        let builder = JoinQueryBuilder<T, U>(joinedTableName: joinClause.identifier)
         let queryCondition = condition(builder)
 
         let newBaseQuery = baseQuery.where { _ in queryCondition }
@@ -50,12 +58,13 @@ public struct JoinQuery<T: Schema, U: Schema>: Sendable {
 
     /// Add ordering to the join query
     public func orderBy<V>(_ field: (JoinQueryBuilder<T, U>) -> JoinField<V>, _ direction: OrderDirection = .asc) -> JoinQuery<T, U> {
-        let builder = JoinQueryBuilder<T, U>()
+        let builder = JoinQueryBuilder<T, U>(joinedTableName: joinClause.identifier)
         let joinField = field(builder)
 
         var newBaseQuery = baseQuery
         // qualifiedName is already pre-quoted ("table"."column")
         newBaseQuery.orderFields.append(OrderByClause(field: joinField.qualifiedName, direction: direction))
+        newBaseQuery.referencedTables.insert(joinField.tableReference)
 
         return JoinQuery(baseQuery: newBaseQuery, joinedSchema: joinedSchema, joinClause: joinClause)
     }
@@ -80,13 +89,14 @@ public struct JoinQuery<T: Schema, U: Schema>: Sendable {
 /// identifier length limit. Only a NULL primary key means an absent outer-join row.
 private struct JoinedProjection<Model: Schema>: Sendable {
     let prefix: String
+    let tableName: String
     let fields = SchemaRegistry.extractMetadata(from: Model.self).fields
 
     private func alias(_ index: Int) -> String { "\(prefix)_\(index)" }
 
     var selection: String {
         fields.enumerated().map { index, field in
-            "\(Model.tableName.quoted).\(field.databaseName.quoted) AS \(alias(index).quoted)"
+            "\(tableName.quoted).\(field.databaseName.quoted) AS \(alias(index).quoted)"
         }.joined(separator: ", ")
     }
 
@@ -123,13 +133,22 @@ private struct JoinedProjection<Model: Schema>: Sendable {
 /// Builder for creating conditions on joined queries
 @dynamicMemberLookup
 public struct JoinQueryBuilder<T: Schema, U: Schema>: Sendable {
-    public init() {}
+    public init() { self.joinedTableName = U.tableName }
+
+    private let joinedTableName: String
+
+    internal init(joinedTableName: String) { self.joinedTableName = joinedTableName }
 
     public var main: JoinQueryField<T> { JoinQueryField<T>(tableName: T.tableName) }
-    public var joined: JoinQueryField<U> { JoinQueryField<U>(tableName: U.tableName) }
+    public var joined: JoinQueryField<U> { JoinQueryField<U>(tableName: joinedTableName) }
+
+    /// Refer to another table already joined into the query.
+    public func table<Model: Schema>(_ type: Model.Type, as alias: String) -> JoinQueryField<Model> {
+        JoinQueryField<Model>(tableName: alias)
+    }
 
     public subscript<V>(dynamicMember keyPath: KeyPath<T, V>) -> JoinField<V> {
-        JoinField<V>(tableName: T.tableName, fieldName: T.column(for: keyPath))
+        JoinField<V>(tableName: T.tableName, fieldName: T.column(for: keyPath), schemaTable: T.tableName)
     }
 }
 
@@ -138,21 +157,27 @@ public struct JoinQueryBuilder<T: Schema, U: Schema>: Sendable {
 extension Query {
     /// Execute as a typed join query.
     ///
-    /// Supports inner and left joins with distinct table names. Right joins cannot
+    /// Supports inner and left joins. Right joins cannot
     /// be represented by `(T, U?)`, since the main row can be absent.
     /// - Throws: `SpectroError.invalidSchema` for missing or unsupported joins.
     public func executeJoin<U: Schema>(with joinedType: U.Type) throws -> JoinQuery<T, U> {
+        try executeJoin(with: joinedType, as: nil)
+    }
+
+    /// Select a specific joined occurrence when the same schema appears more than once.
+    public func executeJoin<U: Schema>(with joinedType: U.Type, as alias: String?) throws -> JoinQuery<T, U> {
+        try validateJoins()
         guard !joins.contains(where: { $0.type == .right }) else {
             throw SpectroError.invalidSchema(reason: "Typed right joins require an optional main model and are not supported by (T, U?). Reverse the query and use a left join.")
         }
-        let tables = [T.tableName] + joins.map(\.table)
-        guard Set(tables).count == tables.count else {
-            throw SpectroError.invalidSchema(reason: "Typed self joins and repeated tables require table aliases, which are not supported yet.")
-        }
-        guard let joinClause = joins.first(where: { $0.table == joinedType.tableName }) else {
+        let matches = joins.filter { $0.table == joinedType.tableName && (alias == nil || $0.identifier == alias) }
+        guard let joinClause = matches.first else {
             throw SpectroError.invalidSchema(
-                reason: "No join found for schema type \(joinedType). Call .join() or .leftJoin() before .executeJoin(with:)."
+                reason: "No join found for schema type \(joinedType)\(alias.map { " with alias '\($0)'" } ?? ""). Call .join() or .leftJoin() before .executeJoin(with:)."
             )
+        }
+        guard matches.count == 1 else {
+            throw SpectroError.invalidSchema(reason: "More than one join for \(joinedType) is present. Select one with .executeJoin(with:as:).")
         }
         let mainFields = SchemaRegistry.extractMetadata(from: T.self).fields
         let joinedFields = SchemaRegistry.extractMetadata(from: U.self).fields
@@ -170,9 +195,18 @@ extension Query {
         _ joinSchema: U.Type,
         on condition: (JoinBuilder<T, U>) -> QueryCondition
     ) async throws -> [(T, U?)] {
+        try await joinAndExecute(joinSchema, as: nil, on: condition)
+    }
+
+    /// Convenience: join and execute in one call, optionally selecting an alias.
+    public func joinAndExecute<U: Schema>(
+        _ joinSchema: U.Type,
+        as alias: String?,
+        on condition: (JoinBuilder<T, U>) -> QueryCondition
+    ) async throws -> [(T, U?)] {
         try await self
-            .join(joinSchema, on: condition)
-            .executeJoin(with: joinSchema)
+            .join(joinSchema, as: alias, on: condition)
+            .executeJoin(with: joinSchema, as: alias)
             .all()
     }
 
@@ -181,9 +215,18 @@ extension Query {
         _ joinSchema: U.Type,
         on condition: (JoinBuilder<T, U>) -> QueryCondition
     ) async throws -> [(T, U?)] {
+        try await leftJoinAndExecute(joinSchema, as: nil, on: condition)
+    }
+
+    /// Convenience: left join and execute in one call, optionally selecting an alias.
+    public func leftJoinAndExecute<U: Schema>(
+        _ joinSchema: U.Type,
+        as alias: String?,
+        on condition: (JoinBuilder<T, U>) -> QueryCondition
+    ) async throws -> [(T, U?)] {
         try await self
-            .leftJoin(joinSchema, on: condition)
-            .executeJoin(with: joinSchema)
+            .leftJoin(joinSchema, as: alias, on: condition)
+            .executeJoin(with: joinSchema, as: alias)
             .all()
     }
 }

@@ -210,7 +210,7 @@ struct QueryOperatorTests {
     func andOperator() async throws {
         try await withQuery { q in
             let sql = q.where { $0.name == "Alice" && $0.age > 18 }.buildSQL()
-            #expect(sql.contains("(\"name\" = $1) AND (\"age\" > $2)"))
+            #expect(sql.contains("(\"test_users\".\"name\" = $1) AND (\"test_users\".\"age\" > $2)"))
         }
     }
 
@@ -218,7 +218,7 @@ struct QueryOperatorTests {
     func orOperator() async throws {
         try await withQuery { q in
             let sql = q.where { $0.name == "Alice" || $0.name == "Bob" }.buildSQL()
-            #expect(sql.contains("(\"name\" = $1) OR (\"name\" = $2)"))
+            #expect(sql.contains("(\"test_users\".\"name\" = $1) OR (\"test_users\".\"name\" = $2)"))
         }
     }
 
@@ -226,7 +226,7 @@ struct QueryOperatorTests {
     func notOperator() async throws {
         try await withQuery { q in
             let sql = q.where { !($0.isActive == true) }.buildSQL()
-            #expect(sql.contains("NOT (\"is_active\" = $1)"))
+            #expect(sql.contains("NOT (\"test_users\".\"is_active\" = $1)"))
         }
     }
 

@@ -75,7 +75,7 @@ struct QueryTests {
     func orderByDefault() async throws {
         try await withQuery { q in
             let sql = q.orderBy { $0.name }.buildSQL()
-            #expect(sql.contains("ORDER BY \"name\" ASC"))
+            #expect(sql.contains("ORDER BY \"test_users\".\"name\" ASC"))
         }
     }
 
@@ -83,7 +83,7 @@ struct QueryTests {
     func orderByDirection() async throws {
         try await withQuery { q in
             let sql = q.orderBy({ $0.age }, .desc).buildSQL()
-            #expect(sql.contains("ORDER BY \"age\" DESC"))
+            #expect(sql.contains("ORDER BY \"test_users\".\"age\" DESC"))
         }
     }
 
@@ -91,7 +91,7 @@ struct QueryTests {
     func multiOrderBy() async throws {
         try await withQuery { q in
             let sql = q.orderBy({ $0.name }, .asc, then: { $0.age }, .desc).buildSQL()
-            #expect(sql.contains("ORDER BY \"name\" ASC, \"age\" DESC"))
+            #expect(sql.contains("ORDER BY \"test_users\".\"name\" ASC, \"test_users\".\"age\" DESC"))
         }
     }
 

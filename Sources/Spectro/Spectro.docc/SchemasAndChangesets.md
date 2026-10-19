@@ -52,6 +52,29 @@ let user = try await repo.insert(changeset)
 
 Inspect `isValid` and `errors` before presenting validation feedback. ``ChangesetErrors`` provides a serializable error representation. Database constraints remain necessary for invariants such as uniqueness under concurrent writes.
 
+### Map database constraints to field errors
+
+```swift
+let changeset = Changeset<User>.cast(nil,
+    params: params, permitted: ["name", "email"])
+    .uniqueConstraint("email", name: "users_email_key", message: "is already registered")
+
+do {
+    _ = try await repo.insert(changeset)
+} catch let error as SpectroError {
+    guard let fields = error.fieldErrors else { throw error }
+    let response = try JSONEncoder().encode(fields)
+}
+```
+
+Declare `uniqueConstraint`, `foreignKeyConstraint`, or `checkConstraint` with the exact database constraint/index name and a Swift property name. A matching name, SQLSTATE, and reported table converts an insert/update failure to `SpectroError.changesetFailed`, retaining the original database error. The expected table defaults to the model's table; a missing or different reported table leaves the original error intact. This avoids attributing another table's trigger failure to this model. `fieldErrors` and `serverError` unwrap transaction failures too. Unregistered database failures and existing local validation errors keep their original behavior.
+
+For a partitioned table, PostgreSQL may report the physical partition. Explicitly accept that origin with, for example, `.checkConstraint("amount", name: "amount_positive", onTable: "orders_2026")`. Declare each accepted partition separately with its exact reported constraint name. Only accept origins that belong to the field being validated.
+
+Declarations do not create constraints or pre-check the database. A failed write still aborts its transaction; use a savepoint when recovering locally before continuing with further writes.
+
+Declare the same composite constraint on multiple fields to attach an error to each. A constraint deferred until commit remains a server error, since no individual changeset write is active when it fails.
+
 ### Update a record
 
 ```swift

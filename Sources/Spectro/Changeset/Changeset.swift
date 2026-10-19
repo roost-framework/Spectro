@@ -23,6 +23,15 @@ import CoreFoundation
 /// ```
 public struct Changeset<T: Schema>: Sendable {
 
+    /// A declared database constraint that may be presented as a field error.
+    private struct ConstraintDeclaration: Sendable {
+        let sqlState: String
+        let field: String
+        let name: String
+        let table: String
+        let message: String
+    }
+
     // MARK: - Properties
 
     /// The original schema instance. `nil` for insert changesets.
@@ -33,6 +42,8 @@ public struct Changeset<T: Schema>: Sendable {
 
     /// Accumulated validation errors (field name → error messages).
     public private(set) var errors: [String: [String]]
+
+    private var constraintDeclarations: [ConstraintDeclaration] = []
 
     /// The set of field names that were permitted during `cast`.
     public let permitted: Set<String>
@@ -147,6 +158,80 @@ public struct Changeset<T: Schema>: Sendable {
         var copy = self
         copy.errors[field, default: []].append(message)
         return copy
+    }
+
+    // MARK: - Database Constraints
+
+    /// Present a violation of the named unique constraint or index on `field` as a field error.
+    /// PostgreSQL still checks uniqueness when the insert or update runs. The server must report
+    /// the model's table by default; `onTable` names another exact physical origin, such as a
+    /// partition leaf. A server error without a table name remains the original database error.
+    public func uniqueConstraint(
+        _ field: String,
+        name: String,
+        onTable: String? = nil,
+        message: String = "has already been taken"
+    ) -> Changeset<T> {
+        declaringConstraint(sqlState: "23505", field: field, name: name, table: onTable ?? T.tableName, message: message)
+    }
+
+    /// Present a violation of the named foreign key constraint on `field` as a field error.
+    /// The server must report the model's table by default. `onTable` names another exact
+    /// physical origin; an error without a reported table remains the original database error.
+    public func foreignKeyConstraint(
+        _ field: String,
+        name: String,
+        onTable: String? = nil,
+        message: String = "does not exist"
+    ) -> Changeset<T> {
+        declaringConstraint(sqlState: "23503", field: field, name: name, table: onTable ?? T.tableName, message: message)
+    }
+
+    /// Present a violation of the named check constraint on `field` as a field error.
+    /// The server must report the model's table by default. `onTable` names another exact
+    /// physical origin, such as a partition leaf; a missing origin leaves the error unchanged.
+    public func checkConstraint(
+        _ field: String,
+        name: String,
+        onTable: String? = nil,
+        message: String = "is invalid"
+    ) -> Changeset<T> {
+        declaringConstraint(sqlState: "23514", field: field, name: name, table: onTable ?? T.tableName, message: message)
+    }
+
+    private func declaringConstraint(
+        sqlState: String, field: String, name: String, table: String, message: String
+    ) -> Changeset<T> {
+        var copy = self
+        copy.constraintDeclarations.append(.init(sqlState: sqlState, field: field, name: name, table: table, message: message))
+        return copy
+    }
+
+    /// Reject a declaration whose target is not a schema property before issuing SQL.
+    func validateConstraintDeclarations() throws {
+        let fields = Set(SchemaRegistry.extractMetadata(from: T.self).fields.map(\.name))
+        for declaration in constraintDeclarations where !fields.contains(declaration.field) {
+            throw SpectroError.invalidField(schema: String(describing: T.self), field: declaration.field)
+        }
+    }
+
+    /// Map only a declared PostgreSQL constraint failure from the declared physical table to structured field errors.
+    /// An unmatched error remains the original database error.
+    func constraintFailure(for error: SpectroError) -> SpectroError? {
+        guard let server = error.serverError,
+              let name = server.constraintName,
+              let table = server.tableName else { return nil }
+        let matching = constraintDeclarations.filter {
+            $0.sqlState == server.sqlState && $0.name == name && $0.table == table
+        }
+        guard !matching.isEmpty else { return nil }
+        var fieldErrors = errors
+        for declaration in matching {
+            if !fieldErrors[declaration.field, default: []].contains(declaration.message) {
+                fieldErrors[declaration.field, default: []].append(declaration.message)
+            }
+        }
+        return .changesetFailed(errors: ChangesetErrors(errors: fieldErrors), underlying: error)
     }
 
     // MARK: - Validation
