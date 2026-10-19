@@ -1181,3 +1181,11 @@ Test crashes are failures. CI uses the exit status of `swift test`, including co
 ## License
 
 MIT
+
+### Exact text comparisons
+
+Use `$0.name.binaryCollated() == value` (also available on nullable text fields)
+to compare exact bytes independently of the column or database collation. Ordering
+uses PostgreSQL's `C` collation, hence lexicographic UTF-8 order on UTF-8 databases.
+This does not normalize Unicode, fold case, change stored data, or alter an index's
+collation. An index used for these comparisons must have a matching collation.

@@ -823,6 +823,7 @@ public struct QueryField<V>: Sendable {
     // Preserve the database name for decoding; SQL also needs the owning table.
     let name: String
     let tableName: String
+    private var binaryCollation = false
 
     init(name: String, tableName: String) {
         self.name = name
@@ -831,8 +832,26 @@ public struct QueryField<V>: Sendable {
 
     // Qualify immediately so filters and ordering also work when a join is added later.
     var qualifiedName: String {
-        "\(tableName.quoted).\(name.quoted)"
+        let column = "\(tableName.quoted).\(name.quoted)"
+        return binaryCollation ? "(\(column) COLLATE \"C\")" : column
     }
+
+    fileprivate func withBinaryCollation() -> Self {
+        var field = self
+        field.binaryCollation = true
+        return field
+    }
+}
+
+extension QueryField where V == String {
+    /// Compare exact bytes using PostgreSQL's C collation, independently of the column's locale.
+    /// With a UTF-8 database, ordering is lexicographic UTF-8 order. No Unicode normalization occurs.
+    public func binaryCollated() -> Self { withBinaryCollation() }
+}
+
+extension QueryField where V == String? {
+    /// The nullable form of `QueryField<String>.binaryCollated()`. NULL semantics are unchanged.
+    public func binaryCollated() -> Self { withBinaryCollation() }
 }
 
 // MARK: - QueryCondition
