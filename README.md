@@ -61,19 +61,19 @@ Browse guides and searchable API reference in the [documentation for the latest 
 Add to your `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.5.0")
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.6.0")
 ```
 
 The `CLI`, `RichTerminal`, and `Migrations` traits, on by default, bring the dependencies of the `spectro` command (ArgumentParser, plus Noora for colors, spinners, prompts, and tables) and `SpectroMigrations`. If you only use SpectroKit, disable them so SwiftPM never fetches ArgumentParser or Noora:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.5.0", traits: [])
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.6.0", traits: [])
 ```
 
 To build the `spectro` command from your dependencies without Noora, as Roost does for `roost spectro`, enable only `CLI`; the command then prints plain text:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.5.0", traits: ["CLI"])
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.6.0", traits: ["CLI"])
 ```
 
 Then add `"SpectroKit"` to your target's dependencies:
@@ -92,13 +92,13 @@ Then add `"SpectroKit"` to your target's dependencies:
 The `spectro` CLI is distributed via [Mint](https://github.com/yonaskolb/Mint):
 
 ```bash
-mint install roost-framework/Spectro@2.5.0
+mint install roost-framework/Spectro@2.6.0
 ```
 
 Pin a version in your `Mintfile`:
 
 ```
-roost-framework/Spectro@2.5.0
+roost-framework/Spectro@2.6.0
 ```
 
 For existing applications, read the [2.1 upgrade guide](docs/UPGRADING-2.1.md) and [release notes](CHANGELOG.md). Applications updating from 1.x should also follow the [2.0 upgrade guide](docs/UPGRADING-2.0.md).
@@ -195,6 +195,10 @@ struct User {
 | `@ManyToMany<T>` | Many-to-many via junction table | `@ManyToMany(junctionTable: "user_tags") var tags: [Tag]` |
 
 Add `@SoftDelete var deletedAt: Date?` and a matching nullable `TIMESTAMPTZ` database column to opt into soft deletes. `@Schema` generates the filtering metadata and timestamp mapping. `repo.delete` records the deletion time; normal reads and joins exclude deleted records, and `update` treats them as missing. `repo.query(User.self).withDeleted()` and `repo.get(User.self, id: id, withDeleted: true)` include them, and `repo.restore(User.self, id: id)` clears the deletion time. For manual schemas, implement `softDeleteColumn` with the database column name and decode the timestamp in `build(from:)`.
+
+When upgrading from a version before 2.4.0, replace updates that clear the deletion timestamp with `restore`. Updates, including changeset updates, now throw `SpectroError.notFound` for deleted or unknown records; code that caught `databaseError` for an update without a matching row should handle `notFound` instead.
+
+When upgrading to 2.6.0, add `changesetFailed` to any exhaustive switch over `SpectroError`. It carries structured field errors for declared database constraints, retains the underlying database error, and exposes PostgreSQL details through `serverError`.
 
 ### Generic primary keys
 
@@ -360,6 +364,33 @@ Only permitted schema fields are kept, using Swift property names even when a co
 
 Pass an existing record instead of `nil` for an update. Direct `Changeset` initialization and `putChange` accept trusted application values without casting.
 
+### Database constraint errors
+
+Declare the database constraints you want to report as field errors. PostgreSQL enforces the constraint during the write, including under concurrent writes:
+
+```swift
+let changeset = Changeset<User>.cast(nil,
+    params: ["name": "Alice", "email": "alice@example.com"],
+    permitted: ["name", "email"])
+    .uniqueConstraint("email", name: "users_email_key", message: "is already registered")
+
+do {
+    let user = try await repo.insert(changeset)
+} catch let error as SpectroError {
+    guard let fields = error.fieldErrors else { throw error }
+    let response = try JSONEncoder().encode(fields)
+    // {"errors":{"email":["is already registered"]}}
+}
+```
+
+`uniqueConstraint`, `foreignKeyConstraint`, and `checkConstraint` require the exact database constraint or index name and a Swift property name, including when its column is renamed. They match the corresponding PostgreSQL SQLSTATE and the reported table, which defaults to the model's table. A matching insert or update throws `SpectroError.changesetFailed`; unmatched failures, including errors without a reported table, retain their original error. This prevents a trigger's failure on a different table with the same constraint name from becoming a field error on this model. `fieldErrors` and `serverError` also unwrap transaction failures. For local validation errors, keep using the changeset's `errors` or `errorPayload`.
+
+If PostgreSQL reports a partition's physical table instead of the parent table, explicitly declare that origin: `.checkConstraint("amount", name: "amount_positive", onTable: "orders_2026")`. Declare each accepted partition separately, using its exact reported constraint name too. `onTable:` opts into mapping errors from that table, so use it only for origins that belong to the field being validated.
+
+A mapped database failure still aborts its PostgreSQL transaction. Use `TransactionRepo.savepoint` around a write if you intend to catch that failure and continue the transaction.
+
+For a composite constraint, declare the same name on each field that should receive an error. Constraints deferred until transaction commit are reported through `serverError`, because the individual insert or update has already returned.
+
 ## Query Builder
 
 `Query<T>` is an immutable value type. Every method returns a new query, so you can safely branch and reuse intermediate queries.
@@ -477,7 +508,37 @@ let results = try await repo.query(User.self)
     .all()
 ```
 
-Typed joins use separate column aliases for each model, including custom column names. Nullable fields remain nil; a malformed present row throws a decoding error. Left joins require a nonnullable primary key on the optional side. Self joins and repeated tables require aliases and are not supported by `executeJoin` yet. Model-returning right joins throw because their main model could be absent, which `[T]` and `[(T, U?)]` cannot represent.
+Typed joins use separate column aliases for each model, including custom column names. Nullable fields remain nil; a malformed present row throws a decoding error. Left joins require a nonnullable primary key on the optional side. Model-returning right joins throw because their main model could be absent, which `[T]` and `[(T, U?)]` cannot represent.
+
+Fields in `Query<T>` filters, ordering, selections, grouping, and aggregates refer to `T`'s table, even when a joined table has the same column names. After `executeJoin`, use `.main` and `.joined` to address either model explicitly.
+
+For a `User` schema with `@Column var managerId: UUID?`, a self join can return each user and their optional manager:
+
+```swift
+let pairs = try await repo.query(User.self)
+    .leftJoin(User.self, as: "manager", on: { $0.left.managerId == $0.right.id })
+    .executeJoin(with: User.self, as: "manager")
+    .orderBy { $0.main.name }
+    .all()
+```
+
+Give every repeated table a distinct alias. When joining another occurrence, `builder.table(User.self, as: "manager")` refers to the earlier occurrence; `builder.right` refers to the one being added. `executeJoin(with:as:)` selects which occurrence to decode alongside the main model. `joinAndExecute` and `leftJoinAndExecute` also accept `as:`. Aliases use 1–63 ASCII letters, digits, or underscores and start with a letter or underscore. Default soft-delete filtering applies to each occurrence; `withDeleted()` includes deleted rows throughout the query.
+
+### Query inspection
+
+```swift
+let query = repo.query(User.self).where { $0.email == "alice@example.com" }
+let statement = try query.statement() // No database call
+print(statement.sql)                // SQL with numbered placeholders
+// statement.parameters contains the separate bound values.
+
+let plan = try await query.explain() // Plain EXPLAIN, without ANALYZE
+let measured = try await query.timedAll()
+let users = measured.rows
+let elapsed = measured.duration     // Duration, including row decoding
+```
+
+These methods also work on `TupleQuery` and typed `JoinQuery`. `statement()` describes the SELECT used by `all()`, not a count or aggregate. `timedAll()` executes once and propagates errors unchanged. All three retain the query's transaction executor. Nothing is logged automatically.
 
 ### Terminal methods
 

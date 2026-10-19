@@ -99,8 +99,8 @@ struct QueryBindingTests {
         let statements = await recorder.statements
         let sql = statements.joined(separator: "\n")
         for fragment in [
-            #"("display_name" = $1) AND ("LegacyCode" IS NOT NULL)"#, #"ORDER BY "org_ref""#,
-            #"SELECT "display_name" FROM"#, #"SUM("view_count")"#, #"GROUP BY "LegacyCode""#,
+            #"("renamed_items"."display_name" = $1) AND ("renamed_items"."LegacyCode" IS NOT NULL)"#, #"ORDER BY "renamed_items"."org_ref""#,
+            #"SELECT "renamed_items"."display_name" FROM"#, #"SUM("renamed_items"."view_count")"#, #"GROUP BY "renamed_items"."LegacyCode""#,
             #"ON "renamed_items"."org_ref" = "test_users"."id""#, #"("renamed_items"."display_name" = $1)"#,
         ] {
             #expect(sql.contains(fragment), "missing \(fragment)")
@@ -119,7 +119,7 @@ struct QueryBindingTests {
         let query = Query(schema: TestUser.self, executor: recorder)
             .where { $0.name == "Alice" || $0.name == "Bob" }
             .where { $0.isActive == true }
-        let expected = #"WHERE (("name" = $1) OR ("name" = $2)) AND ("is_active" = $3)"#
+        let expected = #"WHERE (("test_users"."name" = $1) OR ("test_users"."name" = $2)) AND ("test_users"."is_active" = $3)"#
         #expect(query.buildSQL().contains(expected))
         _ = try await query.count()
         #expect(await recorder.statements.first?.contains(expected) == true)
@@ -129,7 +129,7 @@ struct QueryBindingTests {
     func softDeleteAroundOr() {
         let query = Query(schema: SoftUser.self, executor: Recorder())
             .where { $0.name == "Alice" || $0.name == "Bob" }
-        #expect(query.buildSQL().contains(#"WHERE "deleted_at" IS NULL AND (("name" = $1) OR ("name" = $2))"#))
+        #expect(query.buildSQL().contains(#"WHERE "deleted_at" IS NULL AND (("soft_users"."name" = $1) OR ("soft_users"."name" = $2))"#))
     }
 
     @Test("A having clause chained after an OR still constrains every group")
@@ -141,7 +141,7 @@ struct QueryBindingTests {
             .having { $0.name != "Excluded" }
             .groupedCount()
         #expect(await recorder.statements.first?.contains(
-            #"HAVING (("name" = $1) OR ("name" = $2)) AND ("name" != $3)"#
+            #"HAVING (("test_users"."name" = $1) OR ("test_users"."name" = $2)) AND ("test_users"."name" != $3)"#
         ) == true)
     }
 

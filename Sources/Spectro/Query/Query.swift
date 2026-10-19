@@ -27,6 +27,7 @@ public struct Query<T: Schema>: Sendable {
     internal var offsetValue: Int?
     private var selectedFields: Set<String>?
     internal var joins: [JoinClause] = []
+    internal var referencedTables: Set<JoinTableReference> = []
     internal var groupByFields: [String] = []
     internal var havingClause: String = ""
     internal var havingParameters: [PostgresData] = []
@@ -58,6 +59,7 @@ public struct Query<T: Schema>: Sendable {
         // and soft-delete filter that are ANDed around it.
         copy.whereClause += "(\(queryCondition.sql))"
         copy.whereParameters.append(contentsOf: queryCondition.parameters)
+        copy.referencedTables.formUnion(queryCondition.referencedTables)
 
         return copy
     }
@@ -68,15 +70,25 @@ public struct Query<T: Schema>: Sendable {
         _ joinSchema: U.Type,
         on condition: (JoinBuilder<T, U>) -> QueryCondition
     ) -> Query<T> {
+        join(joinSchema, as: nil, on: condition)
+    }
+
+    public func join<U: Schema>(
+        _ joinSchema: U.Type,
+        as alias: String?,
+        on condition: (JoinBuilder<T, U>) -> QueryCondition
+    ) -> Query<T> {
         var copy = self
-        let builder = JoinBuilder<T, U>()
+        let builder = JoinBuilder<T, U>(rightTableName: alias ?? U.tableName)
         let joinCondition = condition(builder)
         copy.joins.append(JoinClause(
             type: .inner,
             table: joinSchema.tableName,
+            alias: alias,
             softDeleteColumn: U.softDeleteColumn,
             condition: joinCondition.sql,
-            parameters: joinCondition.parameters
+            parameters: joinCondition.parameters,
+            referencedTables: joinCondition.referencedTables
         ))
         return copy
     }
@@ -85,15 +97,25 @@ public struct Query<T: Schema>: Sendable {
         _ joinSchema: U.Type,
         on condition: (JoinBuilder<T, U>) -> QueryCondition
     ) -> Query<T> {
+        leftJoin(joinSchema, as: nil, on: condition)
+    }
+
+    public func leftJoin<U: Schema>(
+        _ joinSchema: U.Type,
+        as alias: String?,
+        on condition: (JoinBuilder<T, U>) -> QueryCondition
+    ) -> Query<T> {
         var copy = self
-        let builder = JoinBuilder<T, U>()
+        let builder = JoinBuilder<T, U>(rightTableName: alias ?? U.tableName)
         let joinCondition = condition(builder)
         copy.joins.append(JoinClause(
             type: .left,
             table: joinSchema.tableName,
+            alias: alias,
             softDeleteColumn: U.softDeleteColumn,
             condition: joinCondition.sql,
-            parameters: joinCondition.parameters
+            parameters: joinCondition.parameters,
+            referencedTables: joinCondition.referencedTables
         ))
         return copy
     }
@@ -102,15 +124,25 @@ public struct Query<T: Schema>: Sendable {
         _ joinSchema: U.Type,
         on condition: (JoinBuilder<T, U>) -> QueryCondition
     ) -> Query<T> {
+        rightJoin(joinSchema, as: nil, on: condition)
+    }
+
+    public func rightJoin<U: Schema>(
+        _ joinSchema: U.Type,
+        as alias: String?,
+        on condition: (JoinBuilder<T, U>) -> QueryCondition
+    ) -> Query<T> {
         var copy = self
-        let builder = JoinBuilder<T, U>()
+        let builder = JoinBuilder<T, U>(rightTableName: alias ?? U.tableName)
         let joinCondition = condition(builder)
         copy.joins.append(JoinClause(
             type: .right,
             table: joinSchema.tableName,
+            alias: alias,
             softDeleteColumn: U.softDeleteColumn,
             condition: joinCondition.sql,
-            parameters: joinCondition.parameters
+            parameters: joinCondition.parameters,
+            referencedTables: joinCondition.referencedTables
         ))
         return copy
     }
@@ -129,7 +161,8 @@ public struct Query<T: Schema>: Sendable {
             table: junctionSchema.tableName,
             softDeleteColumn: Junction.softDeleteColumn,
             condition: firstJoin.sql,
-            parameters: firstJoin.parameters
+            parameters: firstJoin.parameters,
+            referencedTables: firstJoin.referencedTables
         ))
 
         copy.joins.append(JoinClause(
@@ -137,7 +170,8 @@ public struct Query<T: Schema>: Sendable {
             table: targetSchema.tableName,
             softDeleteColumn: U.softDeleteColumn,
             condition: secondJoin.sql,
-            parameters: secondJoin.parameters
+            parameters: secondJoin.parameters,
+            referencedTables: secondJoin.referencedTables
         ))
 
         return copy
@@ -152,7 +186,7 @@ public struct Query<T: Schema>: Sendable {
         var copy = self
         let queryField = field(QueryBuilder<T>())
         copy.orderFields.append(OrderByClause(
-            field: queryField.name.quoted,
+            field: queryField.qualifiedName,
             direction: .asc
         ))
         return copy
@@ -162,7 +196,7 @@ public struct Query<T: Schema>: Sendable {
         var copy = self
         let queryField = field(QueryBuilder<T>())
         copy.orderFields.append(OrderByClause(
-            field: queryField.name.quoted,
+            field: queryField.qualifiedName,
             direction: direction
         ))
         return copy
@@ -176,8 +210,8 @@ public struct Query<T: Schema>: Sendable {
     ) -> Query<T> {
         var copy = self
         let builder = QueryBuilder<T>()
-        copy.orderFields.append(OrderByClause(field: field1(builder).name.quoted, direction: direction1))
-        copy.orderFields.append(OrderByClause(field: field2(builder).name.quoted, direction: direction2))
+        copy.orderFields.append(OrderByClause(field: field1(builder).qualifiedName, direction: direction1))
+        copy.orderFields.append(OrderByClause(field: field2(builder).qualifiedName, direction: direction2))
         return copy
     }
 
@@ -263,6 +297,7 @@ public struct Query<T: Schema>: Sendable {
         }
         copy.havingClause += "(\(cond.sql))"
         copy.havingParameters.append(contentsOf: cond.parameters)
+        copy.referencedTables.formUnion(cond.referencedTables)
         return copy
     }
 
@@ -304,6 +339,7 @@ public struct Query<T: Schema>: Sendable {
     // MARK: - Execution
 
     public func all() async throws -> [T] {
+        try validateJoins()
         guard !joins.contains(where: { $0.type == .right }) else {
             throw SpectroError.invalidSchema(reason: "A right join can have an absent main row and cannot return nonoptional models. Reverse the query and use a left join.")
         }
@@ -332,6 +368,7 @@ public struct Query<T: Schema>: Sendable {
     }
 
     public func count() async throws -> Int {
+        try validateJoins()
         let sql = buildCountSQL()
         let results = try await executor.executeQuery(
             sql: sql,
@@ -379,6 +416,7 @@ public struct Query<T: Schema>: Sendable {
     }
 
     private func aggregateExecute(function: String, column: String) async throws -> Double? {
+        try validateJoins()
         let sql = buildAggregateSQL(function: function, column: column)
         let results = try await executor.executeQuery(
             sql: sql,
@@ -413,6 +451,7 @@ public struct Query<T: Schema>: Sendable {
     }
 
     private func groupedAggregateExecute(function: String, column: String) async throws -> [GroupedResult] {
+        try validateJoins()
         guard !groupByFields.isEmpty else {
             throw SpectroError.invalidQuery("grouped\(function.lowercased().capitalized)() requires at least one groupBy() clause")
         }
@@ -489,7 +528,7 @@ public struct Query<T: Schema>: Sendable {
         let joinClause = buildJoinClause()
         let effectiveWhere = buildWhereClause()
 
-        var sql = "SELECT CAST(\(function)(\(column.quoted)) AS DOUBLE PRECISION) as agg_result FROM \(table)"
+        var sql = "SELECT CAST(\(function)(\(qualifiedColumn(column))) AS DOUBLE PRECISION) as agg_result FROM \(table)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
         if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
@@ -499,11 +538,11 @@ public struct Query<T: Schema>: Sendable {
 
     private func buildGroupedAggregateSQL(function: String, column: String) -> String {
         let table = T.tableName.quoted
-        let groupColumns = groupByFields.map { $0.quoted }.joined(separator: ", ")
+        let groupColumns = groupByFields.map { qualifiedColumn($0) }.joined(separator: ", ")
         let joinClause = buildJoinClause()
         let effectiveWhere = buildWhereClause()
 
-        let colExpr = column == "*" ? "*" : column.quoted
+        let colExpr = column == "*" ? "*" : qualifiedColumn(column)
         var sql = "SELECT \(groupColumns), CAST(\(function)(\(colExpr)) AS DOUBLE PRECISION) as agg_result FROM \(table)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
@@ -523,21 +562,62 @@ public struct Query<T: Schema>: Sendable {
         guard let fields = selectedFields, !fields.isEmpty else {
             return joins.isEmpty ? "*" : "\(T.tableName.quoted).*"
         }
-        // selectedFields stores unquoted snake_case names; quote here for SQL
-        return fields.sorted().map { $0.quoted }.joined(separator: ", ")
+        // Keep result column names unqualified for decoding.
+        return fields.sorted().map { qualifiedColumn($0) }.joined(separator: ", ")
+    }
+
+    internal func qualifiedColumn(_ column: String) -> String {
+        "\(T.tableName.quoted).\(column.quoted)"
     }
 
     internal func buildJoinClause() -> String {
         guard !joins.isEmpty else { return "" }
         return joins.map { join in
             let table = join.table.quoted
+            let identifier = join.identifier.quoted
             // Joining the filtered rows under the table's own name hides soft-deleted rows
             // for every join type; a filter in ON is wrong for a right join, in WHERE for a left.
             guard let sdf = join.softDeleteColumn, !includeSoftDeleted else {
-                return "\(join.type.sql) \(table) ON \(join.condition)"
+                let source = join.alias.map { "\(table) AS \($0.quoted)" } ?? table
+                return "\(join.type.sql) \(source) ON \(join.condition)"
             }
-            return "\(join.type.sql) (SELECT * FROM \(table) WHERE \(sdf.quoted) IS NULL) AS \(table) ON \(join.condition)"
+            return "\(join.type.sql) (SELECT * FROM \(table) WHERE \(sdf.quoted) IS NULL) AS \(identifier) ON \(join.condition)"
         }.joined(separator: " ")
+    }
+
+    /// Validate identifiers before sending SQL to the server. PostgreSQL silently truncates
+    /// identifiers longer than 63 bytes, which can turn distinct aliases into duplicates.
+    internal func validateJoins() throws {
+        var tablesByIdentifier = [T.tableName: T.tableName]
+        func validate(_ references: Set<JoinTableReference>, available: [String: String]) throws {
+            for reference in references.sorted(by: { $0.identifier < $1.identifier }) {
+                guard let actualTable = available[reference.identifier] else {
+                    throw SpectroError.invalidSchema(reason: "Query refers to missing alias '\(reference.identifier)'.")
+                }
+                guard actualTable == reference.table else {
+                    throw SpectroError.invalidSchema(reason: "Alias '\(reference.identifier)' refers to table '\(actualTable)', not '\(reference.table)'.")
+                }
+            }
+        }
+        for join in joins {
+            if let alias = join.alias {
+                let bytes = Array(alias.utf8)
+                let valid = !bytes.isEmpty && bytes.count <= 63 &&
+                    (bytes[0] == 95 || (65...90).contains(bytes[0]) || (97...122).contains(bytes[0])) &&
+                    bytes.dropFirst().allSatisfy { $0 == 95 || (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) }
+                guard valid else {
+                    throw SpectroError.invalidSchema(reason: "Invalid join alias '\(alias)'. Use an identifier of 1...63 ASCII letters, digits, or underscores, starting with a letter or underscore.")
+                }
+            }
+            guard tablesByIdentifier[join.identifier] == nil else {
+                throw SpectroError.invalidSchema(reason: "Duplicate join identifier '\(join.identifier)'. Give repeated tables distinct aliases.")
+            }
+            var available = tablesByIdentifier
+            available[join.identifier] = join.table
+            try validate(join.referencedTables, available: available)
+            tablesByIdentifier = available
+        }
+        try validate(referencedTables, available: tablesByIdentifier)
     }
 
     internal func buildOrderClause() -> String {
@@ -633,12 +713,18 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
     }
 
     public func all() async throws -> [Result] {
+        try baseQuery.validateJoins()
         let sql = buildTupleSQL()
         return try await baseQuery.executor.executeQuery(
             sql: sql,
             parameters: baseQuery.parameters,
             resultMapper: { row in try mapRowToTuple(row) }
         )
+    }
+
+    internal func inspectionContext() throws -> (sql: String, parameters: [PostgresData], executor: any QueryExecutor) {
+        try baseQuery.validateJoins()
+        return (buildTupleSQL(), baseQuery.parameters, baseQuery.executor)
     }
 
     public func first() async throws -> Result? {
@@ -658,7 +744,7 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
 
     private func buildTupleSQL() -> String {
         let table = T.tableName.quoted
-        let selectClause = selectedFields.map { $0.quoted }.joined(separator: ", ")
+        let selectClause = selectedFields.map { baseQuery.qualifiedColumn($0) }.joined(separator: ", ")
         let joinClause = baseQuery.buildJoinClause()
         let effectiveWhere = baseQuery.buildWhereClause()
         let orderClause = baseQuery.buildOrderClause()
@@ -727,18 +813,25 @@ public struct QueryBuilder<T: Schema>: Sendable {
     public init() {}
 
     public subscript<V>(dynamicMember keyPath: KeyPath<T, V>) -> QueryField<V> {
-        QueryField<V>(name: T.column(for: keyPath))
+        QueryField<V>(name: T.column(for: keyPath), tableName: T.tableName)
     }
 }
 
 // MARK: - QueryField
 
 public struct QueryField<V>: Sendable {
-    // The database column, resolved by Schema.column(for:); operators only quote it.
+    // Preserve the database name for decoding; SQL also needs the owning table.
     let name: String
+    let tableName: String
 
-    init(name: String) {
+    init(name: String, tableName: String) {
         self.name = name
+        self.tableName = tableName
+    }
+
+    // Qualify immediately so filters and ordering also work when a join is added later.
+    var qualifiedName: String {
+        "\(tableName.quoted).\(name.quoted)"
     }
 }
 
@@ -751,10 +844,12 @@ public struct QueryField<V>: Sendable {
 public struct QueryCondition: Sendable {
     let sql: String
     let parameters: [PostgresData]
+    let referencedTables: Set<JoinTableReference>
 
-    init(sql: String, parameters: [PostgresData] = []) {
+    init(sql: String, parameters: [PostgresData] = [], referencedTables: Set<JoinTableReference> = []) {
         self.sql = sql
         self.parameters = parameters
+        self.referencedTables = referencedTables
     }
 }
 
@@ -762,71 +857,71 @@ public struct QueryCondition: Sendable {
 
 extension QueryField where V: Equatable {
     public static func == (lhs: QueryField<V>, rhs: V) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.name.quoted) = ?", parameters: [convertToPostgresData(rhs)])
+        QueryCondition(sql: "\(lhs.qualifiedName) = ?", parameters: [convertToPostgresData(rhs)])
     }
 
     public static func != (lhs: QueryField<V>, rhs: V) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.name.quoted) != ?", parameters: [convertToPostgresData(rhs)])
+        QueryCondition(sql: "\(lhs.qualifiedName) != ?", parameters: [convertToPostgresData(rhs)])
     }
 }
 
 extension QueryField where V: Comparable {
     public static func > (lhs: QueryField<V>, rhs: V) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.name.quoted) > ?", parameters: [convertToPostgresData(rhs)])
+        QueryCondition(sql: "\(lhs.qualifiedName) > ?", parameters: [convertToPostgresData(rhs)])
     }
 
     public static func >= (lhs: QueryField<V>, rhs: V) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.name.quoted) >= ?", parameters: [convertToPostgresData(rhs)])
+        QueryCondition(sql: "\(lhs.qualifiedName) >= ?", parameters: [convertToPostgresData(rhs)])
     }
 
     public static func < (lhs: QueryField<V>, rhs: V) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.name.quoted) < ?", parameters: [convertToPostgresData(rhs)])
+        QueryCondition(sql: "\(lhs.qualifiedName) < ?", parameters: [convertToPostgresData(rhs)])
     }
 
     public static func <= (lhs: QueryField<V>, rhs: V) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.name.quoted) <= ?", parameters: [convertToPostgresData(rhs)])
+        QueryCondition(sql: "\(lhs.qualifiedName) <= ?", parameters: [convertToPostgresData(rhs)])
     }
 }
 
 extension QueryField where V == String {
     public func like(_ pattern: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) LIKE ?", parameters: [PostgresData(string: pattern)])
+        QueryCondition(sql: "\(qualifiedName) LIKE ?", parameters: [PostgresData(string: pattern)])
     }
 
     public func ilike(_ pattern: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) ILIKE ?", parameters: [PostgresData(string: pattern)])
+        QueryCondition(sql: "\(qualifiedName) ILIKE ?", parameters: [PostgresData(string: pattern)])
     }
 
     public func notLike(_ pattern: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) NOT LIKE ?", parameters: [PostgresData(string: pattern)])
+        QueryCondition(sql: "\(qualifiedName) NOT LIKE ?", parameters: [PostgresData(string: pattern)])
     }
 
     public func notIlike(_ pattern: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) NOT ILIKE ?", parameters: [PostgresData(string: pattern)])
+        QueryCondition(sql: "\(qualifiedName) NOT ILIKE ?", parameters: [PostgresData(string: pattern)])
     }
 
     public func startsWith(_ prefix: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) LIKE ?", parameters: [PostgresData(string: "\(prefix)%")])
+        QueryCondition(sql: "\(qualifiedName) LIKE ?", parameters: [PostgresData(string: "\(prefix)%")])
     }
 
     public func endsWith(_ suffix: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) LIKE ?", parameters: [PostgresData(string: "%\(suffix)")])
+        QueryCondition(sql: "\(qualifiedName) LIKE ?", parameters: [PostgresData(string: "%\(suffix)")])
     }
 
     public func contains(_ substring: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) LIKE ?", parameters: [PostgresData(string: "%\(substring)%")])
+        QueryCondition(sql: "\(qualifiedName) LIKE ?", parameters: [PostgresData(string: "%\(substring)%")])
     }
 
     public func iStartsWith(_ prefix: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) ILIKE ?", parameters: [PostgresData(string: "\(prefix)%")])
+        QueryCondition(sql: "\(qualifiedName) ILIKE ?", parameters: [PostgresData(string: "\(prefix)%")])
     }
 
     public func iEndsWith(_ suffix: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) ILIKE ?", parameters: [PostgresData(string: "%\(suffix)")])
+        QueryCondition(sql: "\(qualifiedName) ILIKE ?", parameters: [PostgresData(string: "%\(suffix)")])
     }
 
     public func iContains(_ substring: String) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) ILIKE ?", parameters: [PostgresData(string: "%\(substring)%")])
+        QueryCondition(sql: "\(qualifiedName) ILIKE ?", parameters: [PostgresData(string: "%\(substring)%")])
     }
 }
 
@@ -838,7 +933,7 @@ extension QueryField where V: Equatable {
         }
         let placeholders = Array(repeating: "?", count: valueArray.count).joined(separator: ", ")
         return QueryCondition(
-            sql: "\(name.quoted) IN (\(placeholders))",
+            sql: "\(qualifiedName) IN (\(placeholders))",
             parameters: valueArray.map { convertToPostgresData($0) }
         )
     }
@@ -850,7 +945,7 @@ extension QueryField where V: Equatable {
         }
         let placeholders = Array(repeating: "?", count: valueArray.count).joined(separator: ", ")
         return QueryCondition(
-            sql: "\(name.quoted) NOT IN (\(placeholders))",
+            sql: "\(qualifiedName) NOT IN (\(placeholders))",
             parameters: valueArray.map { convertToPostgresData($0) }
         )
     }
@@ -859,7 +954,7 @@ extension QueryField where V: Equatable {
 extension QueryField where V: Comparable {
     public func between(_ lower: V, and upper: V) -> QueryCondition {
         QueryCondition(
-            sql: "\(name.quoted) BETWEEN ? AND ?",
+            sql: "\(qualifiedName) BETWEEN ? AND ?",
             parameters: [convertToPostgresData(lower), convertToPostgresData(upper)]
         )
     }
@@ -867,37 +962,37 @@ extension QueryField where V: Comparable {
 
 extension QueryField where V == Date {
     public func before(_ date: Date) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) < ?", parameters: [PostgresData(date: date)])
+        QueryCondition(sql: "\(qualifiedName) < ?", parameters: [PostgresData(date: date)])
     }
 
     public func after(_ date: Date) -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) > ?", parameters: [PostgresData(date: date)])
+        QueryCondition(sql: "\(qualifiedName) > ?", parameters: [PostgresData(date: date)])
     }
 
     public func isToday() -> QueryCondition {
-        QueryCondition(sql: "DATE(\(name.quoted)) = CURRENT_DATE")
+        QueryCondition(sql: "DATE(\(qualifiedName)) = CURRENT_DATE")
     }
 
     public func isThisWeek() -> QueryCondition {
-        QueryCondition(sql: "DATE_TRUNC('week', \(name.quoted)) = DATE_TRUNC('week', CURRENT_DATE)")
+        QueryCondition(sql: "DATE_TRUNC('week', \(qualifiedName)) = DATE_TRUNC('week', CURRENT_DATE)")
     }
 
     public func isThisMonth() -> QueryCondition {
-        QueryCondition(sql: "DATE_TRUNC('month', \(name.quoted)) = DATE_TRUNC('month', CURRENT_DATE)")
+        QueryCondition(sql: "DATE_TRUNC('month', \(qualifiedName)) = DATE_TRUNC('month', CURRENT_DATE)")
     }
 
     public func isThisYear() -> QueryCondition {
-        QueryCondition(sql: "DATE_TRUNC('year', \(name.quoted)) = DATE_TRUNC('year', CURRENT_DATE)")
+        QueryCondition(sql: "DATE_TRUNC('year', \(qualifiedName)) = DATE_TRUNC('year', CURRENT_DATE)")
     }
 }
 
 extension QueryField {
     public func isNull() -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) IS NULL")
+        QueryCondition(sql: "\(qualifiedName) IS NULL")
     }
 
     public func isNotNull() -> QueryCondition {
-        QueryCondition(sql: "\(name.quoted) IS NOT NULL")
+        QueryCondition(sql: "\(qualifiedName) IS NOT NULL")
     }
 }
 
@@ -907,19 +1002,21 @@ extension QueryField {
 public func && (lhs: QueryCondition, rhs: QueryCondition) -> QueryCondition {
     QueryCondition(
         sql: "(\(lhs.sql)) AND (\(rhs.sql))",
-        parameters: lhs.parameters + rhs.parameters
+        parameters: lhs.parameters + rhs.parameters,
+        referencedTables: lhs.referencedTables.union(rhs.referencedTables)
     )
 }
 
 public func || (lhs: QueryCondition, rhs: QueryCondition) -> QueryCondition {
     QueryCondition(
         sql: "(\(lhs.sql)) OR (\(rhs.sql))",
-        parameters: lhs.parameters + rhs.parameters
+        parameters: lhs.parameters + rhs.parameters,
+        referencedTables: lhs.referencedTables.union(rhs.referencedTables)
     )
 }
 
 public prefix func ! (condition: QueryCondition) -> QueryCondition {
-    QueryCondition(sql: "NOT (\(condition.sql))", parameters: condition.parameters)
+    QueryCondition(sql: "NOT (\(condition.sql))", parameters: condition.parameters, referencedTables: condition.referencedTables)
 }
 
 // MARK: - PostgresData Conversion
@@ -944,12 +1041,31 @@ internal struct OrderByClause: Sendable {
     let direction: OrderDirection
 }
 
+internal struct JoinTableReference: Hashable, Sendable {
+    let identifier: String
+    let table: String
+}
+
 internal struct JoinClause: Sendable {
     let type: JoinType
     let table: String
+    let alias: String?
     let softDeleteColumn: String?
     let condition: String
     let parameters: [PostgresData]
+    let referencedTables: Set<JoinTableReference>
+
+    var identifier: String { alias ?? table }
+
+    init(type: JoinType, table: String, alias: String? = nil, softDeleteColumn: String?, condition: String, parameters: [PostgresData], referencedTables: Set<JoinTableReference> = []) {
+        self.type = type
+        self.table = table
+        self.alias = alias
+        self.softDeleteColumn = softDeleteColumn
+        self.condition = condition
+        self.parameters = parameters
+        self.referencedTables = referencedTables
+    }
 }
 
 internal enum JoinType: Sendable {
@@ -969,13 +1085,22 @@ internal enum JoinType: Sendable {
 
 @dynamicMemberLookup
 public struct JoinBuilder<T: Schema, U: Schema>: Sendable {
-    public init() {}
+    public init() { self.rightTableName = U.tableName }
+
+    private let rightTableName: String
+
+    internal init(rightTableName: String) { self.rightTableName = rightTableName }
 
     public var left: JoinQueryField<T> { JoinQueryField<T>(tableName: T.tableName) }
-    public var right: JoinQueryField<U> { JoinQueryField<U>(tableName: U.tableName) }
+    public var right: JoinQueryField<U> { JoinQueryField<U>(tableName: rightTableName) }
+
+    /// Refer to a table already present in the query while building another join.
+    public func table<Model: Schema>(_ type: Model.Type, as alias: String) -> JoinQueryField<Model> {
+        JoinQueryField<Model>(tableName: alias)
+    }
 
     public subscript<V>(dynamicMember keyPath: KeyPath<T, V>) -> JoinField<V> {
-        JoinField<V>(tableName: T.tableName, fieldName: T.column(for: keyPath))
+        JoinField<V>(tableName: T.tableName, fieldName: T.column(for: keyPath), schemaTable: T.tableName)
     }
 }
 
@@ -996,17 +1121,23 @@ public struct JoinQueryField<T: Schema>: Sendable {
     }
 
     public subscript<V>(dynamicMember keyPath: KeyPath<T, V>) -> JoinField<V> {
-        JoinField<V>(tableName: tableName, fieldName: T.column(for: keyPath))
+        JoinField<V>(tableName: tableName, fieldName: T.column(for: keyPath), schemaTable: T.tableName)
     }
 }
 
 public struct JoinField<V>: Sendable {
     let tableName: String
     let fieldName: String
+    let schemaTable: String
 
-    init(tableName: String, fieldName: String) {
+    init(tableName: String, fieldName: String, schemaTable: String) {
         self.tableName = tableName
         self.fieldName = fieldName
+        self.schemaTable = schemaTable
+    }
+
+    internal var tableReference: JoinTableReference {
+        JoinTableReference(identifier: tableName, table: schemaTable)
     }
 
     /// Fully-qualified, quoted identifier: `"table"."column"`
@@ -1019,26 +1150,35 @@ public struct JoinField<V>: Sendable {
 
 extension JoinField where V: Equatable {
     public static func == (lhs: JoinField<V>, rhs: JoinField<V>) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.qualifiedName) = \(rhs.qualifiedName)")
+        QueryCondition(sql: "\(lhs.qualifiedName) = \(rhs.qualifiedName)", referencedTables: [lhs.tableReference, rhs.tableReference])
     }
 
     public static func == (lhs: JoinField<V>, rhs: V) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.qualifiedName) = ?", parameters: [convertToPostgresData(rhs)])
+        QueryCondition(sql: "\(lhs.qualifiedName) = ?", parameters: [convertToPostgresData(rhs)], referencedTables: [lhs.tableReference])
     }
 
     public static func != (lhs: JoinField<V>, rhs: JoinField<V>) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.qualifiedName) != \(rhs.qualifiedName)")
+        QueryCondition(sql: "\(lhs.qualifiedName) != \(rhs.qualifiedName)", referencedTables: [lhs.tableReference, rhs.tableReference])
     }
 }
 
 extension JoinField where V: Comparable {
     public static func > (lhs: JoinField<V>, rhs: JoinField<V>) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.qualifiedName) > \(rhs.qualifiedName)")
+        QueryCondition(sql: "\(lhs.qualifiedName) > \(rhs.qualifiedName)", referencedTables: [lhs.tableReference, rhs.tableReference])
     }
 
     public static func < (lhs: JoinField<V>, rhs: JoinField<V>) -> QueryCondition {
-        QueryCondition(sql: "\(lhs.qualifiedName) < \(rhs.qualifiedName)")
+        QueryCondition(sql: "\(lhs.qualifiedName) < \(rhs.qualifiedName)", referencedTables: [lhs.tableReference, rhs.tableReference])
     }
+}
+
+/// SQL permits comparing a nullable foreign key with a nonnullable primary key.
+public func == <Value: Equatable>(lhs: JoinField<Value?>, rhs: JoinField<Value>) -> QueryCondition {
+    QueryCondition(sql: "\(lhs.qualifiedName) = \(rhs.qualifiedName)", referencedTables: [lhs.tableReference, rhs.tableReference])
+}
+
+public func == <Value: Equatable>(lhs: JoinField<Value>, rhs: JoinField<Value?>) -> QueryCondition {
+    QueryCondition(sql: "\(lhs.qualifiedName) = \(rhs.qualifiedName)", referencedTables: [lhs.tableReference, rhs.tableReference])
 }
 
 // MARK: - KeyPath Field Name Extraction

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.6.0 — 2026-10-19
+
+- Add explicit aliases to joins and typed joined reads, including self joins and repeated tables. Select a joined occurrence with `executeJoin(with:as:)`; nullable join keys can be compared with nonnullable keys. Duplicate, invalid, and missing alias references fail before execution. Preserve the original join overloads so existing method references still compile.
+- Add opt-in `Changeset.uniqueConstraint`, `foreignKeyConstraint`, and `checkConstraint` declarations. Matching database failures become `SpectroError.changesetFailed` with structured `fieldErrors`, while retaining `serverError`. Match exact database names, SQLSTATE, and the reported table; `onTable:` explicitly accepts another origin such as a partition. Undeclared failures and existing local validation behavior are unchanged.
+- Add `statement()`, `explain()`, and `timedAll()` to model queries, projections, and typed joins. Inspect bound parameters separately from SQL, request plain PostgreSQL EXPLAIN, or measure one execution including decoding. These operations use the query's executor, including inside transactions.
+- Qualify `Query<T>` fields with their owning table in filters, ordering, selections, grouping, and aggregates. Joined tables with overlapping column names could make these operations fail with an ambiguous-column error, including with custom column names and soft deletes. Filters and ordering also retain their owning table when a join is added later.
+- Add PostgreSQL integration coverage combining custom column names, soft deletes, joined reads, aggregates, restoration, transactions, and savepoints, including restoration conflicts and rollbacks after a nested savepoint has been released.
+- Highlight the 2.4.0 update/restore migration in the README.
+- Report 2.6.0 from `spectro --version`, pin the Mint installation examples and the Mintfile to 2.6.0, and require 2.6.0 in the package installation examples. Add `changesetFailed` to exhaustive `SpectroError` switches when upgrading.
+
+[Full comparison with 2.5.0](https://github.com/roost-framework/Spectro/compare/2.5.0...2.6.0)
+
 ## 2.5.0 — 2026-10-17
 
 - Add `TransactionRepo.savepoint(_:)`. A failed statement aborts the enclosing PostgreSQL transaction, so every later statement failed with SQLSTATE 25P02. `savepoint` releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged, so the transaction stays usable. Savepoints nest. `transaction()` on a `TransactionRepo` still throws `transactionAlreadyStarted`.

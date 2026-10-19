@@ -265,6 +265,7 @@ public actor TransactionRepo: Repo {
 
     public func insert<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
         let changes = try changeset.applyChanges()
+        try changeset.validateConstraintDeclarations()
         guard !changes.isEmpty else {
             throw SpectroError.invalidSchema(reason: "Cannot insert from a changeset with no changes")
         }
@@ -290,7 +291,12 @@ public actor TransactionRepo: Repo {
             RETURNING *
             """
 
-        let rows = try await context.query(sql, values, mapper: { $0 })
+        let rows: [PostgresRow]
+        do {
+            rows = try await context.query(sql, values, mapper: { $0 })
+        } catch let error as SpectroError {
+            throw changeset.constraintFailure(for: error) ?? error
+        }
 
         guard let row = rows.first else {
             throw SpectroError.databaseError(reason: "Insert did not return a row")
@@ -307,6 +313,7 @@ public actor TransactionRepo: Repo {
         }
 
         let changes = try changeset.applyChanges()
+        try changeset.validateConstraintDeclarations()
         guard !changes.isEmpty else {
             return existingData
         }
@@ -322,7 +329,11 @@ public actor TransactionRepo: Repo {
             )
         }
 
-        return try await update(T.self, id: id, changes: changes)
+        do {
+            return try await update(T.self, id: id, changes: changes)
+        } catch let error as SpectroError {
+            throw changeset.constraintFailure(for: error) ?? error
+        }
     }
 
     public func transaction<T: Sendable>(_ work: @escaping @Sendable (any Repo) async throws -> T) async throws -> T {

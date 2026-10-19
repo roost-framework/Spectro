@@ -62,6 +62,33 @@ let postsWithUsers: [(Post, User?)] = try await repo.query(Post.self)
 
 Each side has its own column projection. A missing right-side row is `nil`; a present row that cannot decode throws. Typed left joins require a nonnullable primary key on the optional side to distinguish absence.
 
-Model-returning right joins cannot represent an absent main model and throw. Reverse the query and use a left join when you need to retain all rows from the other table. Self joins and repeated tables require aliases and are not supported by typed joined execution.
+Model-returning right joins cannot represent an absent main model and throw. Reverse the query and use a left join when you need to retain all rows from the other table.
+
+### Alias repeated tables
+
+For a `User` with `@Column var managerId: UUID?`, use a distinct alias for its manager:
+
+```swift
+let pairs = try await repo.query(User.self)
+    .leftJoin(User.self, as: "manager", on: { $0.left.managerId == $0.right.id })
+    .executeJoin(with: User.self, as: "manager")
+    .orderBy { $0.main.name }
+    .all()
+```
+
+Select the joined occurrence with `executeJoin(with:as:)`. When building a later join, `builder.table(User.self, as: "manager")` references an earlier alias. Each occurrence retains its own custom column mapping and soft-delete filter. Aliases must be distinct, contain 1–63 ASCII letters, digits, or underscores, and start with a letter or underscore.
+
+### Inspect and measure a query
+
+```swift
+let query = repo.query(User.self).where { $0.name == "Alice" }
+let statement = try query.statement()
+let sql = statement.sql
+let parameters = statement.parameters
+let plan = try await query.explain()
+let measured = try await query.timedAll()
+```
+
+``QueryStatement`` keeps SQL and bind values separate. `statement()` renders the SELECT used by `all()` without executing it. `explain()` uses plain PostgreSQL EXPLAIN without ANALYZE. ``TimedQueryResult`` contains `rows` and a `Duration` measured over one execution including decoding. These methods also support projections and typed joins, use the original executor, and never log automatically.
 
 Query operations also work on the repository supplied to a transaction. See <doc:TransactionsAndConfiguration>.

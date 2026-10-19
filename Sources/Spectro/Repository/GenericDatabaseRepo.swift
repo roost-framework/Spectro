@@ -344,6 +344,7 @@ public actor GenericDatabaseRepo: Repo {
     /// ```
     public func insert<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
         let changes = try changeset.applyChanges()
+        try changeset.validateConstraintDeclarations()
         guard !changes.isEmpty else {
             throw SpectroError.invalidSchema(
                 reason: "Cannot insert from a changeset with no changes"
@@ -371,11 +372,16 @@ public actor GenericDatabaseRepo: Repo {
             RETURNING *
             """
 
-        let rows = try await connection.executeQuery(
-            sql: sql,
-            parameters: values,
-            resultMapper: { $0 }
-        )
+        let rows: [PostgresRow]
+        do {
+            rows = try await connection.executeQuery(
+                sql: sql,
+                parameters: values,
+                resultMapper: { $0 }
+            )
+        } catch let error as SpectroError {
+            throw changeset.constraintFailure(for: error) ?? error
+        }
 
         guard let row = rows.first else {
             throw SpectroError.databaseError(reason: "Insert did not return a row")
@@ -402,6 +408,7 @@ public actor GenericDatabaseRepo: Repo {
         }
 
         let changes = try changeset.applyChanges()
+        try changeset.validateConstraintDeclarations()
         guard !changes.isEmpty else {
             return existingData
         }
@@ -417,7 +424,11 @@ public actor GenericDatabaseRepo: Repo {
             )
         }
 
-        return try await update(T.self, id: id, changes: changes)
+        do {
+            return try await update(T.self, id: id, changes: changes)
+        } catch let error as SpectroError {
+            throw changeset.constraintFailure(for: error) ?? error
+        }
     }
 
 }

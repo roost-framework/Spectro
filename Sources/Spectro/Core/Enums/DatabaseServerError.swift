@@ -37,7 +37,7 @@ extension SpectroError {
     /// The PostgreSQL server error behind this error, or `nil` if the server reported none.
     ///
     /// Unwraps `transactionFailed`, the original error of `transactionAndRollbackFailed`,
-    /// `queryExecutionFailed`, `invalidSql`, `migrationFailed`, and `connectionFailed`, including
+    /// `changesetFailed`, `queryExecutionFailed`, `invalidSql`, `migrationFailed`, and `connectionFailed`, including
     /// nested `SpectroError`s, then reads PostgresNIO's `PSQLError` or its legacy
     /// `PostgresError.server`. Errors Spectro raises itself, such as `notFound`, and connection
     /// failures without a server response return `nil`.
@@ -55,6 +55,8 @@ extension SpectroError {
              .migrationFailed(_, let error),
              .connectionFailed(let error):
             return error
+        case .changesetFailed(_, let underlying):
+            return underlying
         default:
             return nil
         }
