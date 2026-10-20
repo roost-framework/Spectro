@@ -131,5 +131,39 @@ struct SandboxTests {
             }
         }
     }
+
+    @Test("A failed statement leaves the sandbox usable, as outside it")
+    func failedStatement() async throws {
+        try await withSpectro { spectro in
+            try await spectro.sandbox { repo in
+                _ = try await repo.insert(SandboxItem(name: "dup"))
+                await #expect(throws: SpectroError.self) { try await repo.insert(SandboxItem(name: "dup")) }
+                #expect(try await repo.query(SandboxItem.self).count() == 1)
+                _ = try await repo.insert(SandboxItem(name: "next"))
+                #expect(try await repo.query(SandboxItem.self).count() == 2)
+            }
+        }
+    }
+
+    @Test("A transaction's repository stops working when the transaction ends")
+    func endedTransactions() async throws {
+        try await withSpectro { spectro in
+            let stray = try await spectro.sandbox { repo in
+                try await repo.transaction { tx in
+                    Task {
+                        try await Task.sleep(for: .milliseconds(100))
+                        _ = try await tx.insert(SandboxItem(name: "stray"))
+                    }
+                }
+            }
+            await #expect(throws: SpectroError.self) { try await stray.value }
+            #expect(try await committedCount() == 0)
+
+            // Outside a sandbox too: a captured repository cannot reach the pooled connection.
+            let committed = try await spectro.transaction { tx in tx }
+            await #expect(throws: SpectroError.self) { try await committed.insert(SandboxItem(name: "late")) }
+            #expect(try await committedCount() == 0)
+        }
+    }
 }
 }

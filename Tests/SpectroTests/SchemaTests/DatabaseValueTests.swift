@@ -85,7 +85,7 @@ struct DatabaseValueUnitTests {
 
     @Test("Values encode with their PostgreSQL types")
     func encoding() throws {
-        #expect(Decimal(string: "19.99")!.toPostgresData().type == .numeric)
+        #expect(try Decimal(string: "19.99")!.toPostgresData().type == .numeric)
         #expect(try ["a", "b"].toPostgresData().type == .textArray)
         #expect(try [ArticleStatus.draft].toPostgresData().type == .textArray)
         // A String raw value is sent untyped, so PostgreSQL enum columns accept it.
@@ -97,6 +97,24 @@ struct DatabaseValueUnitTests {
         #expect(throws: SpectroError.self) { try [Cents(amount: 1)].toPostgresData() }
         let json = PostgresData(type: .json, formatCode: .binary, value: ByteBuffer(string: #"{"views":2}"#))
         #expect(ArticleMeta.fromPostgresData(json) == ArticleMeta(views: 2, editor: nil))
+    }
+
+    @Test("Decimals reject NaN, malformed strings, and more digits than they hold")
+    func decimalLimits() {
+        #expect(throws: SpectroError.self) { try Decimal.nan.toPostgresData() }
+        #expect(throws: SpectroError.self) { try [Decimal.nan].toPostgresData() }
+        for input in ["1,000", "1,000.00", "12abc", "12.50 USD", ".", "--1", "NaN", "", "1e5"] {
+            #expect(Decimal.cast(input) == nil, "\(input)")
+        }
+        #expect(Decimal.cast("-12.50") == Decimal(string: "-12.50"))
+        #expect(Decimal.cast("+3") == 3)
+        #expect(Decimal.cast(".5") == Decimal(string: "0.5"))
+        #expect(Decimal.cast(Decimal.nan) == nil)
+
+        let fifty = String(repeating: "1", count: 50)
+        #expect(Decimal.fromPostgresData(PostgresData(numeric: PostgresNumeric(string: fifty)!)) == nil)
+        let wide = "1" + String(repeating: "0", count: 60) + ".000"
+        #expect(Decimal.fromPostgresData(PostgresData(numeric: PostgresNumeric(string: wide)!)) == Decimal(string: wide))
     }
 
     @Test("Schemas with the same name keep separate metadata")
@@ -144,7 +162,7 @@ struct DatabaseValueUnitTests {
     func arrayConditions() {
         let tags = QueryField<[String]>(name: "tags", tableName: "typed_articles")
         #expect(tags.contains("swift").sql == #"? = ANY("typed_articles"."tags")"#)
-        #expect(tags.containsAll(["a"]).sql == #""typed_articles"."tags" @> ?"#)
+        #expect(tags.containsAll(["a"]).sql == #""typed_articles"."tags"::text[] @> ?"#)
         #expect(tags.overlaps(["a"]).parameters.first?.type == .textArray)
         let scores = QueryField<[Int]?>(name: "scores", tableName: "typed_articles")
         #expect(scores.contains(3).parameters.first?.int == 3)
@@ -259,6 +277,35 @@ struct DatabaseValueIntegrationTests {
             #expect(try await prices(q.where { $0.tags.overlaps(["elixir", "postgres"]) }) == [15, 25])
             #expect(try await prices(q.where { $0.reviewerIds.contains(reviewer) }) == [15])
             #expect(try await q.where { $0.price.between(Decimal(1), and: Decimal(20)) }.count() == 2)
+        }
+    }
+
+    @Test("Array containment works on integer[] columns bound from [Int]")
+    func integerArrays() async throws {
+        try await withTable { repo in
+            var first = article(price: "1")
+            first.scores = [1, 2, 3]
+            var second = article(price: "2")
+            second.scores = [3, 4]
+            _ = try await repo.insert(first)
+            _ = try await repo.insert(second)
+            let q = repo.query(TypedArticle.self).orderBy { $0.price }
+            #expect(try await q.where { $0.scores.containsAll([1, 3]) }.all().map(\.price) == [1])
+            #expect(try await q.where { $0.scores.overlaps([4, 9]) }.all().map(\.price) == [2])
+        }
+    }
+
+    @Test("Values a field cannot represent fail to decode, and NaN fails to encode")
+    func undecodable() async throws {
+        try await withTable { repo in
+            let inserted = try await repo.insert(article(price: "3"))
+            try await repo.executeRawSQL(#"ALTER TABLE "typed_articles" ALTER COLUMN "status" TYPE TEXT"#)
+            _ = try await repo.executeRawQuery(sql: #"UPDATE "typed_articles" SET "status" = 'retired'"#)
+            await #expect(throws: SpectroError.self) { try await repo.get(TypedArticle.self, id: inserted.id) }
+
+            var nan = article(price: "0")
+            nan.price = Decimal.nan
+            await #expect(throws: SpectroError.self) { try await repo.insert(nan) }
         }
     }
 

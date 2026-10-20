@@ -38,7 +38,8 @@ extension Schema {
         try buildInstance(from: decodeValues(of: row, fields: SchemaRegistry.extractMetadata(from: self).fields))
     }
 
-    /// Decode each field's column, keyed by property name. NULL and undecodable values are omitted.
+    /// Decode each field's column, keyed by property name. NULL values are omitted.
+    /// - Throws: `SpectroError.resultDecodingFailed` for a value the field's type cannot decode.
     /// - Parameter allowingMissingColumns: Leave fields without a column at their defaults,
     ///   as for a subset of columns chosen with `selectFields`, instead of throwing.
     internal static func decodeValues(of row: PostgresRow, fields: [FieldInfo], allowingMissingColumns: Bool = false) throws -> [String: Any] {
@@ -49,9 +50,13 @@ extension Schema {
                 if allowingMissingColumns { continue }
                 throw SpectroError.resultDecodingFailed(column: "\(tableName).\(field.databaseName)", expectedType: String(describing: field.valueType))
             }
-            if let value = field.decode(randomAccess[data: field.databaseName]) {
-                values[field.name] = value
+            let data = randomAccess[data: field.databaseName]
+            guard data.value != nil else { continue }
+            // A value the field's type cannot represent fails, rather than becoming the default.
+            guard let value = field.decode(data) else {
+                throw SpectroError.resultDecodingFailed(column: "\(tableName).\(field.databaseName)", expectedType: String(describing: field.valueType))
             }
+            values[field.name] = value
         }
         return values
     }

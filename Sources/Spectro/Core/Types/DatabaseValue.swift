@@ -175,27 +175,56 @@ extension Data: DatabaseValue {
     public static var postgresType: PostgresDataType { .bytea }
 }
 
-/// Stored as `numeric`, without binary floating-point rounding.
+/// Stored as `numeric`, without binary floating-point rounding. `Decimal` holds 38 significant
+/// digits: decoding a longer value fails rather than rounding it, and NaN cannot be stored.
 extension Decimal: DatabaseValue {
-    public func toPostgresData() -> PostgresData { PostgresData(numeric: PostgresNumeric(decimal: self)) }
-
-    public static func fromPostgresData(_ data: PostgresData) -> Decimal? {
-        data.decimal ?? data.int.map { Decimal($0) }
+    public func toPostgresData() throws -> PostgresData {
+        // PostgresNIO traps on a NaN numeric.
+        guard !isNaN else {
+            throw SpectroError.invalidParameter(name: "value", value: "NaN", reason: "Decimal NaN cannot be stored as numeric")
+        }
+        return PostgresData(numeric: PostgresNumeric(decimal: self))
     }
 
-    /// Accepts decimals, integers, finite doubles, and numeric strings such as `"12.50"`.
+    public static func fromPostgresData(_ data: PostgresData) -> Decimal? {
+        if let int = data.int { return Decimal(int) }
+        guard let string = data.string, string != "NaN", significantDigits(string) <= 38 else { return nil }
+        return Decimal(string: string, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// Accepts decimals, integers, finite doubles, and plain numeric strings such as `"-12.50"`.
+    /// Strings with separators, units, or exponents, such as `"1,000"`, are rejected.
     public static func cast(_ value: any Sendable) -> Decimal? {
+        let result: Decimal?
         switch value {
-        case let v as Decimal: return v
-        case let v as Int: return Decimal(v)
+        case let v as Decimal: result = v
+        case let v as Int: result = Decimal(v)
         // The shortest description avoids binary rounding: 0.1 becomes 0.1, not 0.1000000000000000055.
-        case let v as Double: return v.isFinite ? Decimal(string: "\(v)", locale: Locale(identifier: "en_US_POSIX")) : nil
-        case let v as String: return Decimal(string: v, locale: Locale(identifier: "en_US_POSIX"))
-        default: return nil
+        case let v as Double: result = v.isFinite ? Decimal(string: "\(v)", locale: Locale(identifier: "en_US_POSIX")) : nil
+        case let v as String: result = isPlainNumber(v) ? Decimal(string: v, locale: Locale(identifier: "en_US_POSIX")) : nil
+        default: result = nil
         }
+        return result.flatMap { $0.isNaN ? nil : $0 }
     }
 
     public static var postgresType: PostgresDataType { .numeric }
+
+    /// An optional sign, then digits with at most one decimal point.
+    private static func isPlainNumber(_ string: String) -> Bool {
+        let body = string.first == "-" || string.first == "+" ? string.dropFirst() : Substring(string)
+        return body.contains(where: \.isASCIIDigit) && body.filter { $0 == "." }.count <= 1
+            && body.allSatisfy { $0.isASCIIDigit || $0 == "." }
+    }
+
+    /// Digits of a numeric's text without leading and trailing zeros, which `Decimal` stores in its exponent.
+    private static func significantDigits(_ numeric: String) -> Int {
+        let digits = numeric.filter(\.isASCIIDigit)
+        return digits.drop { $0 == "0" }.reversed().drop { $0 == "0" }.count
+    }
+}
+
+private extension Character {
+    var isASCIIDigit: Bool { isASCII && isNumber }
 }
 
 // MARK: - Raw-value enums
@@ -335,6 +364,17 @@ extension PostgresDataType {
         .date: .dateArray, .float8: .float8Array, .float4: .float4Array, .numeric: .numericArray,
         .bytea: .byteaArray, .jsonb: .jsonbArray,
     ]
+
+    /// The SQL name of the array type whose elements have this type, such as `bigint[]`.
+    var arrayTypeName: String? {
+        let names: [PostgresDataType: String] = [
+            .text: "text[]", .varchar: "varchar[]", .int8: "bigint[]", .int4: "integer[]",
+            .int2: "smallint[]", .bool: "boolean[]", .uuid: "uuid[]", .timestamptz: "timestamptz[]",
+            .date: "date[]", .float8: "double precision[]", .float4: "real[]", .numeric: "numeric[]",
+            .bytea: "bytea[]", .jsonb: "jsonb[]",
+        ]
+        return names[self]
+    }
 }
 
 // MARK: - Optionals

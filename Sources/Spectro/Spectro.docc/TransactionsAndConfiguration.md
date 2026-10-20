@@ -41,7 +41,7 @@ Transactions use `READ COMMITTED` isolation. The closure receives a ``Repo`` bac
 
 Calling a separately captured pooled repository inside the closure performs work outside that transaction. Pass `any Repo` to application functions so they can receive either a pooled repository or the transaction's repository.
 
-Nested transactions are unsupported and throw `SpectroError.transactionAlreadyStarted`. To roll back one step without aborting the transaction, call `savepoint(_:)` on the ``TransactionRepo``: it releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Errors that escape the closure come back wrapped in `SpectroError.transactionFailed`; `SpectroError.serverError` returns the underlying PostgreSQL error's SQLSTATE and constraint, or `nil`. Do not retain the transaction repository or ``TransactionContext`` after the closure returns.
+Nested transactions are unsupported and throw `SpectroError.transactionAlreadyStarted`. To roll back one step without aborting the transaction, call `savepoint(_:)` on the ``TransactionRepo``: it releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Errors that escape the closure come back wrapped in `SpectroError.transactionFailed`; `SpectroError.serverError` returns the underlying PostgreSQL error's SQLSTATE and constraint, or `nil`. Do not retain the transaction repository or ``TransactionContext`` after the closure returns: once the transaction has ended, their statements throw `SpectroError.noActiveTransaction`.
 
 ### Observe statements
 
@@ -56,7 +56,7 @@ try await client.sandbox { repo in
 }
 ```
 
-`sandbox(_:)` runs its body in a transaction that is always rolled back, like Ecto's SQL sandbox. Every repository of the client, in the body and the tasks that inherit it, uses it. `transaction` becomes a savepoint that holds the connection until it ends. Statements from a task that outlives the sandbox throw.
+`sandbox(_:)` runs its body in a transaction that is always rolled back, like Ecto's SQL sandbox. Every repository of the client, in the body and the tasks that inherit it, uses it, and each statement runs in its own savepoint, so a failed one leaves the sandbox usable. `transaction` becomes a savepoint that holds the connection until it ends. Statements from a task that outlives the sandbox throw.
 
 ### Shut down cleanly
 

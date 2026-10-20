@@ -997,12 +997,12 @@ extension QueryField {
 
     /// `column @> elements`: the array column contains every one of `elements`.
     public func containsAll<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E] {
-        QueryCondition(sql: "\(qualifiedName) @> ?", parameters: [convertToPostgresData(elements)])
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) @> ?", parameters: [convertToPostgresData(elements)])
     }
 
     /// `column && elements`: the array column shares at least one element with `elements`.
     public func overlaps<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E] {
-        QueryCondition(sql: "\(qualifiedName) && ?", parameters: [convertToPostgresData(elements)])
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) && ?", parameters: [convertToPostgresData(elements)])
     }
 
     /// The nullable form of `contains(_:)`. A NULL array contains nothing.
@@ -1012,12 +1012,19 @@ extension QueryField {
 
     /// The nullable form of `containsAll(_:)`.
     public func containsAll<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E]? {
-        QueryCondition(sql: "\(qualifiedName) @> ?", parameters: [convertToPostgresData(elements)])
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) @> ?", parameters: [convertToPostgresData(elements)])
     }
 
     /// The nullable form of `overlaps(_:)`.
     public func overlaps<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E]? {
-        QueryCondition(sql: "\(qualifiedName) && ?", parameters: [convertToPostgresData(elements)])
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) && ?", parameters: [convertToPostgresData(elements)])
+    }
+
+    /// The column cast to the type of a bound `[E]`, as `@>` and `&&` need equal array types:
+    /// `[Int]` binds `bigint[]`, so an `integer[]` column would not match. The cast is free when
+    /// the types already match, which also keeps a GIN index on the column usable.
+    private func arrayColumn<E: DatabaseValue>(of element: E.Type) -> String {
+        E.postgresType.arrayTypeName.map { "\(qualifiedName)::\($0)" } ?? qualifiedName
     }
 }
 

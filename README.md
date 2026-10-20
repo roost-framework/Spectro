@@ -275,7 +275,7 @@ struct Listing {
 }
 ```
 
-Give enum and `JSONBValue` properties a default value, as above, since they have no `init()`. Raw-value enums are stored as their raw value; arrays of them need a `text[]` column rather than an array of a PostgreSQL enum type. Changesets cast request input to these types: `"12.50"` to a `Decimal`, `"published"` to a `Status`, and a JSON object to an `Address`.
+Give enum and `JSONBValue` properties a default value, as above, since they have no `init()`. A value a property cannot represent, such as an enum label it lacks, fails decoding with `SpectroError.resultDecodingFailed`. `Decimal` holds 38 significant digits and cannot store NaN. Raw-value enums are stored as their raw value; arrays of them need a `text[]` column rather than an array of a PostgreSQL enum type. Changesets cast request input to these types: `"12.50"` to a `Decimal`, `"published"` to a `Status`, and a JSON object to an `Address`.
 
 Conform other types by implementing `toPostgresData()` and `fromPostgresData(_:)`, and optionally `cast(_:)` for changesets and `postgresType` for arrays:
 
@@ -1229,7 +1229,7 @@ With an external scratch directory, set `SPECTRO_CLI_PATH` to its built `spectro
 }
 ```
 
-`transaction` inside a sandbox becomes a savepoint, so a failed transaction rolls back alone. A transaction holds the sandbox's connection until it ends, and other tasks' statements wait for it, so concurrent transactions cannot undo each other. `Task { }` inherits the sandbox, and its statements throw once the sandbox has ended rather than reaching the database; `Task.detached` uses the pool as usual.
+Each statement runs in its own savepoint, so a test can expect a constraint error and keep going. `transaction` inside a sandbox becomes a savepoint, so a failed transaction rolls back alone. A transaction holds the sandbox's connection until it ends, and other tasks' statements wait for it, so concurrent transactions cannot undo each other. `Task { }` inherits the sandbox, and its statements throw once the sandbox has ended rather than reaching the database; `Task.detached` uses the pool as usual.
 
 ### Test structure
 
