@@ -22,8 +22,9 @@ protocol ColumnNameOverridable {
 
 // MARK: - Column Wrappers
 
+/// A stored column of a `DatabaseValue` type, with an optional database name.
 @propertyWrapper
-public struct Column<T: Sendable>: Sendable, ColumnNameOverridable {
+public struct Column<T: DatabaseValue>: Sendable, ColumnNameOverridable {
     public var wrappedValue: T
     public let columnName: String?
 
@@ -38,6 +39,16 @@ public struct Column<T: Sendable>: Sendable, ColumnNameOverridable {
     }
 }
 
+/// A `@Column` whose type schema metadata can read and decode.
+protocol DatabaseColumnWrapper {
+    var columnName: String? { get }
+    static var storedType: any DatabaseValue.Type { get }
+}
+
+extension Column: DatabaseColumnWrapper {
+    static var storedType: any DatabaseValue.Type { T.self }
+}
+
 @propertyWrapper
 public struct ID<T: PrimaryKeyType>: Sendable, PrimaryKeyWrapperProtocol {
     public var wrappedValue: T
@@ -48,6 +59,7 @@ public struct ID<T: PrimaryKeyType>: Sendable, PrimaryKeyWrapperProtocol {
     public var primaryKeyPostgresData: PostgresData { wrappedValue.toPostgresData() }
     public var primaryKeyFieldType: FieldType { T.fieldType }
     public var primaryKeyHashable: AnyHashable { AnyHashable(wrappedValue) }
+    public var primaryKeyValueType: any DatabaseValue.Type { T.self }
 }
 
 @propertyWrapper
@@ -87,6 +99,7 @@ public struct ForeignKey<T: PrimaryKeyType>: Sendable, ForeignKeyWrapperProtocol
     public var foreignKeyFieldType: FieldType { T.fieldType }
     public var foreignKeyHashable: AnyHashable { AnyHashable(wrappedValue) }
     public var foreignKeyColumnName: String? { columnName }
+    public var foreignKeyValueType: any DatabaseValue.Type { T.self }
 }
 
 // MARK: - Relationship Wrappers

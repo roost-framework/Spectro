@@ -5,12 +5,9 @@ import PostgresKit
 ///
 /// Conform to this protocol to use a type as an `@ID` or `@ForeignKey` value.
 /// Built-in conformances: `UUID`, `Int`, `String`.
-public protocol PrimaryKeyType: Sendable, Hashable, Codable {
+public protocol PrimaryKeyType: DatabaseValue, Hashable, Codable {
     /// Converts this value to `PostgresData` for query parameters.
     func toPostgresData() -> PostgresData
-
-    /// Attempts to decode a value from a `PostgresData` cell.
-    static func fromPostgresData(_ data: PostgresData) -> Self?
 
     /// The default value for uninitialized primary keys.
     static var defaultValue: Self { get }
@@ -22,24 +19,15 @@ public protocol PrimaryKeyType: Sendable, Hashable, Codable {
 // MARK: - Built-in Conformances
 
 extension UUID: PrimaryKeyType {
-    public func toPostgresData() -> PostgresData { PostgresData(uuid: self) }
-    public static func fromPostgresData(_ data: PostgresData) -> UUID? { data.uuid }
     public static var defaultValue: UUID { UUID() }
-    public static var fieldType: FieldType { .uuid }
 }
 
 extension Int: PrimaryKeyType {
-    public func toPostgresData() -> PostgresData { PostgresData(int: self) }
-    public static func fromPostgresData(_ data: PostgresData) -> Int? { data.int }
     public static var defaultValue: Int { 0 }
-    public static var fieldType: FieldType { .int }
 }
 
 extension String: PrimaryKeyType {
-    public func toPostgresData() -> PostgresData { PostgresData(string: self) }
-    public static func fromPostgresData(_ data: PostgresData) -> String? { data.string }
     public static var defaultValue: String { "" }
-    public static var fieldType: FieldType { .string }
 }
 
 // MARK: - Marker Protocols for Reflection
@@ -54,6 +42,13 @@ public protocol PrimaryKeyWrapperProtocol {
 
     /// The wrapped value as `AnyHashable` for dictionary keying.
     var primaryKeyHashable: AnyHashable { get }
+
+    /// The primary key's Swift type.
+    var primaryKeyValueType: any DatabaseValue.Type { get }
+}
+
+extension PrimaryKeyWrapperProtocol {
+    public var primaryKeyValueType: any DatabaseValue.Type { primaryKeyFieldType.builtInValueType }
 }
 
 /// Non-generic marker protocol for runtime type checking of `ForeignKey<T>` via Mirror.
@@ -69,4 +64,26 @@ public protocol ForeignKeyWrapperProtocol {
 
     /// The column name override, if any.
     var foreignKeyColumnName: String? { get }
+
+    /// The foreign key's Swift type.
+    var foreignKeyValueType: any DatabaseValue.Type { get }
+}
+
+extension ForeignKeyWrapperProtocol {
+    public var foreignKeyValueType: any DatabaseValue.Type { foreignKeyFieldType.builtInValueType }
+}
+
+extension FieldType {
+    /// The built-in type of each classification, for wrappers that predate `DatabaseValue`.
+    var builtInValueType: any DatabaseValue.Type {
+        switch self {
+        case .string, .custom: String.self
+        case .int: Int.self
+        case .double: Double.self
+        case .float: Float.self
+        case .bool: Bool.self
+        case .uuid: UUID.self
+        case .date: Date.self
+        }
+    }
 }

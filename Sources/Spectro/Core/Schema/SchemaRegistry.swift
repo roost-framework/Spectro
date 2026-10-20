@@ -1,10 +1,10 @@
 import Foundation
+@preconcurrency import PostgresNIO
 
 // MARK: - FieldType
 //
-// Replaces Any.Type in FieldInfo. Using a closed enum instead of metatypes
-// makes FieldInfo fully Sendable without @unchecked, and allows exhaustive
-// switching in SchemaMapper without runtime reflection.
+// A closed enum keeps FieldInfo's classification exhaustively switchable.
+// The stored type itself is FieldInfo.valueType.
 
 public enum FieldType: Sendable {
     case string
@@ -14,6 +14,8 @@ public enum FieldType: Sendable {
     case bool
     case uuid
     case date
+    /// Any other `DatabaseValue`, such as `Decimal`, an array, an enum, or a JSONB value.
+    case custom
 }
 
 // MARK: - FieldInfo
@@ -27,21 +29,31 @@ public struct FieldInfo: Sendable {
     public let isTimestamp: Bool
     public let isNullable: Bool
     public let isSoftDelete: Bool
+    /// The stored Swift type, without `Optional` for nullable columns.
+    public let valueType: any DatabaseValue.Type
 
-    /// The Swift metatype for this field, derived from `fieldType`.
+    init(name: String, databaseName: String, valueType: any DatabaseValue.Type, isPrimaryKey: Bool = false,
+         isForeignKey: Bool = false, isTimestamp: Bool = false, isNullable: Bool = false, isSoftDelete: Bool = false) {
+        self.name = name
+        self.databaseName = databaseName
+        self.fieldType = valueType.fieldType
+        self.isPrimaryKey = isPrimaryKey
+        self.isForeignKey = isForeignKey
+        self.isTimestamp = isTimestamp
+        self.isNullable = isNullable
+        self.isSoftDelete = isSoftDelete
+        self.valueType = valueType
+    }
+
+    /// The Swift metatype for this field.
     ///
     /// Provided for backward compatibility with `SchemaMapper.extractValue(from:expectedType:)`.
-    /// Prefer `fieldType` for new code.
-    public var type: Any.Type {
-        switch fieldType {
-        case .string: return String.self
-        case .int: return Int.self
-        case .double: return Double.self
-        case .float: return Float.self
-        case .bool: return Bool.self
-        case .uuid: return UUID.self
-        case .date: return Date.self
-        }
+    /// Prefer `valueType` for new code.
+    public var type: Any.Type { valueType }
+
+    /// Decode a column value as `valueType`, or `nil` for SQL NULL or an undecodable value.
+    func decode(_ data: PostgresData) -> Any? {
+        valueType.fromPostgresData(data)
     }
 }
 
@@ -65,22 +77,23 @@ public struct SchemaMetadata: Sendable {
 // MARK: - SchemaRegistry
 
 public actor SchemaRegistry {
-    private var registry: [String: SchemaMetadata] = [:]
+    // Keyed by type identity: names repeat across modules and nesting types.
+    private var registry: [ObjectIdentifier: SchemaMetadata] = [:]
 
     public static let shared = SchemaRegistry()
 
     private init() {}
 
     public func register<T: Schema>(_ type: T.Type) -> SchemaMetadata {
-        let typeName = String(describing: type)
-        if let existing = registry[typeName] { return existing }
+        let key = ObjectIdentifier(type)
+        if let existing = registry[key] { return existing }
         let metadata = Self.extractMetadata(from: type)
-        registry[typeName] = metadata
+        registry[key] = metadata
         return metadata
     }
 
     public func metadata<T: Schema>(for type: T.Type) -> SchemaMetadata? {
-        registry[String(describing: type)]
+        registry[ObjectIdentifier(type)]
     }
 
     // Pure inspection is also used by synchronous Changeset.cast.
@@ -100,69 +113,23 @@ public actor SchemaRegistry {
 
         switch value {
         case let pk as any PrimaryKeyWrapperProtocol:
-            return FieldInfo(name: fieldName, databaseName: defaultDBName, fieldType: pk.primaryKeyFieldType,
-                             isPrimaryKey: true, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
+            return FieldInfo(name: fieldName, databaseName: defaultDBName, valueType: pk.primaryKeyValueType, isPrimaryKey: true)
 
-        case let col as Column<String>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .string,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
-        case let col as Column<String?>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .string,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: false)
-
-        case let col as Column<Int>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .int,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
-        case let col as Column<Int?>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .int,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: false)
-
-        case let col as Column<Bool>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .bool,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
-        case let col as Column<Bool?>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .bool,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: false)
-
-        case let col as Column<Double>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .double,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
-        case let col as Column<Double?>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .double,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: false)
-
-        case let col as Column<Float>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .float,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
-        case let col as Column<Float?>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .float,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: false)
-
-        case let col as Column<Date>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .date,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
-        case let col as Column<Date?>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .date,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: false)
-
-        case let col as Column<UUID>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .uuid,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: false, isSoftDelete: false)
-        case let col as Column<UUID?>:
-            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName, fieldType: .uuid,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: false)
+        case let col as any DatabaseColumnWrapper:
+            let stored = type(of: col).storedType
+            let wrapped = (stored as? any OptionalDatabaseValue.Type)?.wrappedValueType
+            return FieldInfo(name: fieldName, databaseName: col.columnName ?? defaultDBName,
+                             valueType: wrapped ?? stored, isNullable: wrapped != nil)
 
         case is Timestamp:
-            return FieldInfo(name: fieldName, databaseName: defaultDBName, fieldType: .date,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: true, isNullable: false, isSoftDelete: false)
+            return FieldInfo(name: fieldName, databaseName: defaultDBName, valueType: Date.self, isTimestamp: true)
 
         case is SoftDelete:
-            return FieldInfo(name: fieldName, databaseName: defaultDBName, fieldType: .date,
-                             isPrimaryKey: false, isForeignKey: false, isTimestamp: false, isNullable: true, isSoftDelete: true)
+            return FieldInfo(name: fieldName, databaseName: defaultDBName, valueType: Date.self, isNullable: true, isSoftDelete: true)
 
         case let col as any ForeignKeyWrapperProtocol:
-            return FieldInfo(name: fieldName, databaseName: col.foreignKeyColumnName ?? defaultDBName, fieldType: col.foreignKeyFieldType,
-                             isPrimaryKey: false, isForeignKey: true, isTimestamp: false, isNullable: false, isSoftDelete: false)
+            return FieldInfo(name: fieldName, databaseName: col.foreignKeyColumnName ?? defaultDBName,
+                             valueType: col.foreignKeyValueType, isForeignKey: true)
 
         default:
             return nil

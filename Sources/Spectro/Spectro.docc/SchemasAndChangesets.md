@@ -27,6 +27,25 @@ struct User {
 
 The macro also has an `encodable: false` form when you need to provide your own encoding implementation.
 
+### Store PostgreSQL types
+
+```swift
+enum Status: String, Codable, DatabaseValue { case draft, published }
+struct Address: Codable, JSONBValue { var city: String }
+
+@Schema("listings")
+struct Listing {
+    @ID var id: UUID
+    @Column var price: Decimal
+    @Column var status: Status = .draft
+    @Column var tags: [String]
+    @Column var address: Address = Address(city: "")
+    @Column var photo: Data
+}
+```
+
+``Column`` stores any ``DatabaseValue``, Spectro's counterpart of `Ecto.Type`: the scalar types above, `Decimal` as `numeric`, `Data` as `bytea`, arrays as PostgreSQL arrays, `[String: Value]` dictionaries and ``JSONBValue`` types as `jsonb`, raw-value enums as their raw value, and `Optional` of any of them as a nullable column. A `String` raw value fits text, varchar, and PostgreSQL enum columns. Changesets cast input to these types, such as `"12.50"` to a `Decimal` or a JSON object to an `Address`. Conform another type by implementing `toPostgresData()` and `fromPostgresData(_:)`.
+
 ### Cast permitted input
 
 ```swift

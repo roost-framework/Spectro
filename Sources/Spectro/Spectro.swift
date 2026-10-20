@@ -51,6 +51,27 @@ public struct Spectro: Sendable {
     public func shutdown() async {
         await connection.shutdown()
     }
+
+    /// Run `body` in a transaction that is always rolled back, for tests, like Ecto's SQL sandbox.
+    ///
+    /// Every repository made from this instance, in `body` and the tasks that inherit its
+    /// task-local values, runs its statements in that transaction, so code under test needs no
+    /// changes. `transaction` becomes a savepoint that holds the connection until it ends.
+    /// Data written in `body` is discarded when it returns or throws, and statements from a
+    /// task that outlives it throw.
+    ///
+    /// ```swift
+    /// @Test func signup() async throws {
+    ///     try await spectro.sandbox { repo in
+    ///         try await SignupService(repo: spectro.repository()).register(email: "a@b.c")
+    ///         #expect(try await repo.query(User.self).count() == 1)
+    ///     }
+    /// }
+    /// ```
+    public func sandbox<T: Sendable>(_ body: @Sendable (GenericDatabaseRepo) async throws -> T) async throws -> T {
+        let repo = repository()
+        return try await connection.sandbox { try await body(repo) }
+    }
 }
 
 // MARK: - Convenience

@@ -43,6 +43,21 @@ Calling a separately captured pooled repository inside the closure performs work
 
 Nested transactions are unsupported and throw `SpectroError.transactionAlreadyStarted`. To roll back one step without aborting the transaction, call `savepoint(_:)` on the ``TransactionRepo``: it releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Errors that escape the closure come back wrapped in `SpectroError.transactionFailed`; `SpectroError.serverError` returns the underlying PostgreSQL error's SQLSTATE and constraint, or `nil`. Do not retain the transaction repository or ``TransactionContext`` after the closure returns.
 
+### Observe statements
+
+Set `logger` on ``DatabaseConfiguration`` to log each statement at debug level with its SQL, row count, and timings, but not its bound values. Set `onQuery` to a ``QueryObserver`` to receive a ``QueryEvent`` per statement, including `BEGIN`, `COMMIT`, and `ROLLBACK`, for metrics or tracing.
+
+### Sandbox tests
+
+```swift
+try await client.sandbox { repo in
+    _ = try await repo.insert(User(name: "Alice", email: "alice@example.com"))
+    #expect(try await client.repository().query(User.self).count() == 1)
+}
+```
+
+`sandbox(_:)` runs its body in a transaction that is always rolled back, like Ecto's SQL sandbox. Every repository of the client, in the body and the tasks that inherit it, uses it. `transaction` becomes a savepoint that holds the connection until it ends. Statements from a task that outlives the sandbox throw.
+
 ### Shut down cleanly
 
 Call `await client.shutdown()` when the application's database lifetime ends, including failure paths. Reuse the client and its pool during normal operation rather than creating a new connection system for each request.

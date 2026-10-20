@@ -474,51 +474,10 @@ public struct Changeset<T: Schema>: Sendable {
         // otherwise accept true as 1 and numeric 0/1 as Bool.
         if let number = value as? NSNumber {
             let isBoolean = CFGetTypeID(number) == CFBooleanGetTypeID()
-            switch (field.fieldType, isBoolean) {
-            case (.int, true), (.double, true), (.float, true), (.bool, false): return nil
-            default: break
-            }
+            if isBoolean != (field.fieldType == .bool) { return nil }
         }
 
-        switch field.fieldType {
-        case .string:
-            return value as? String
-        case .int:
-            if let number = value as? Int { return number }
-            return (value as? String).flatMap(Int.init)
-        case .double:
-            let number: Double?
-            if let v = value as? Double { number = v }
-            else if let v = value as? Int { number = Double(v) }
-            else if let v = value as? Float { number = Double(v) }
-            else { number = (value as? String).flatMap(Double.init) }
-            return number.flatMap { $0.isFinite ? $0 : nil }
-        case .float:
-            let number: Float?
-            if let v = value as? Float { number = v }
-            else if let v = value as? Double { number = Float(v) }
-            else if let v = value as? Int { number = Float(v) }
-            else { number = (value as? String).flatMap(Float.init) }
-            return number.flatMap { $0.isFinite ? $0 : nil }
-        case .bool:
-            if let boolean = value as? Bool { return boolean }
-            switch value as? String {
-            case "true", "1": return true
-            case "false", "0": return false
-            default: return nil
-            }
-        case .uuid:
-            if let uuid = value as? UUID { return uuid }
-            return (value as? String).flatMap(UUID.init(uuidString:))
-        case .date:
-            if let date = value as? Date { return date }
-            guard let string = value as? String else { return nil }
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = formatter.date(from: string) { return date }
-            formatter.formatOptions = [.withInternetDateTime]
-            return formatter.date(from: string)
-        }
+        return field.valueType.cast(value)
     }
 
     /// Extract a field value from a schema instance by property name using Mirror.
@@ -551,6 +510,7 @@ public struct Changeset<T: Schema>: Sendable {
     /// Convert a value to Double for numeric validation.
     private func toDouble(_ value: Any) -> Double? {
         switch value {
+        case let v as Decimal: return NSDecimalNumber(decimal: v).doubleValue
         case let v as Int:    return Double(v)
         case let v as Double: return v
         case let v as Float:  return Double(v)

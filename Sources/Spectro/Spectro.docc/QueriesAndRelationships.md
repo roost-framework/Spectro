@@ -20,6 +20,32 @@ let first = try await query.first()
 
 The query builder binds values separately from SQL text. Use the API's typed fields for filters, ordering, grouping, and aggregates.
 
+### Write SQL fragments
+
+```swift
+let users = try await repo.query(User.self)
+    .where { .fragment("lower(\($0.email)) = lower(\(email))") }
+    .where { .fragment("\($0.settings) ? 'beta'") }
+    .all()
+```
+
+``QueryCondition/fragment(_:)`` takes an ``SQLFragment``, like Ecto's `fragment`. Interpolated fields become qualified columns and interpolated values become bound parameters, while a literal `?`, such as the `jsonb` operator, stays in the SQL. Filter on a joined table with `$0.table(Post.self).title`.
+
+### Update, delete, and lock many rows
+
+```swift
+let updated = try await repo.query(Post.self)
+    .where { $0.authorId == authorID }
+    .updateAll { [$0.views.increment(by: 1), $0.tags.push("featured")] }
+let deleted = try await repo.query(Session.self).where { $0.expiresAt.before(Date()) }.deleteAll()
+
+let job = try await client.transaction { tx in
+    try await tx.query(Job.self).limit(1).lock(.update, .skipLocked).first()
+}
+```
+
+`updateAll(_:)` and `deleteAll()` change every matching row in one statement and return how many changed. Each ``FieldAssignment`` sets a value, a SQL expression, an increment, or an array element. `deleteAll()` sets the deletion time of soft-deleted models. `lock(_:_:)` takes a ``RowLockStrength`` and a ``RowLockWait`` and locks the queried table's rows until the transaction ends.
+
 ### Declare a relationship
 
 ```swift
@@ -52,6 +78,15 @@ let users = try await repo.query(User.self)
 ```
 
 Use the projected relationship key path, such as `\.$posts`. Preloading batches related records for the selected parents instead of issuing one query per parent. Supply `foreignKey:` when the field does not follow the naming convention. Chain preloads to load multiple relationships.
+
+```swift
+let authors = try await repo.query(User.self)
+    .preload(\.$posts) { $0.where { $0.published == true }.preload(\.$comments) }
+    .all()
+let withProfiles = try await repo.preload(authors, \.$profile)
+```
+
+A ``PreloadCustomization`` returns a ``ModelQuery`` that loads the related records: filter and order them, or preload their own relationships, with one query per level. `preload(_:_:foreignKey:_:)` on a ``Repo`` loads a relationship of records already fetched.
 
 ### Return typed joined models
 

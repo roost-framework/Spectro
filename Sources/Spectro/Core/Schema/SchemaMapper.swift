@@ -10,25 +10,18 @@ public struct SchemaMapper {
         metadata: SchemaMetadata
     ) throws -> T {
         var instance = T()
-        let randomAccess = row.makeRandomAccess()
-        var values: [String: Any] = [:]
-
-        for field in metadata.fields {
-            let dbValue = randomAccess[data: field.databaseName]
-            if let value = extractValue(from: dbValue, expectedType: field.type) {
-                values[field.name] = value
-            }
-        }
-
+        let values = try T.decodeValues(of: row, fields: metadata.fields)
         try applyValues(values, to: &instance, using: metadata)
         return instance
     }
 
+    /// Encode an instance's stored fields, keyed by database column.
+    /// - Throws: The error of a value that cannot be encoded, rather than leaving its column out.
     public static func extractData<T: Schema>(
         from instance: T,
         metadata: SchemaMetadata,
         excludePrimaryKey: Bool = false
-    ) -> [String: PostgresData] {
+    ) throws -> [String: PostgresData] {
         var data: [String: PostgresData] = [:]
         let mirror = Mirror(reflecting: instance)
 
@@ -39,9 +32,8 @@ public struct SchemaMapper {
             if excludePrimaryKey && field.name == metadata.primaryKeyField { continue }
             if field.isSoftDelete { continue }
 
-            if let value = extractPropertyWrapperValue(child.value),
-               let postgresData = try? convertToPostgresData(value) {
-                data[field.databaseName] = postgresData
+            if let value = extractPropertyWrapperValue(child.value) {
+                data[field.databaseName] = try convertToPostgresData(value)
             }
         }
 
@@ -51,19 +43,7 @@ public struct SchemaMapper {
     // MARK: - Value Extraction
 
     public static func extractValue(from dbValue: PostgresData, expectedType: Any.Type) -> Any? {
-        switch expectedType {
-        case is String.Type: return dbValue.string
-        case is Int.Type:    return dbValue.int
-        case is Bool.Type:   return dbValue.bool
-        case is UUID.Type:   return dbValue.uuid
-        case is Date.Type:   return dbValue.date
-        case is Double.Type: return dbValue.double
-        case is Float.Type:  return dbValue.float
-        case is Data.Type:
-            if let bytes = dbValue.bytes { return Data(bytes) }
-            return nil
-        default: return nil
-        }
+        (expectedType as? any DatabaseValue.Type)?.fromPostgresData(dbValue)
     }
 
     private static func applyValues<T: Schema>(
@@ -101,22 +81,14 @@ public struct SchemaMapper {
             return PostgresData(type: .null, value: nil)
         }
 
-        switch value {
-        case let v as String:  return PostgresData(string: v)
-        case let v as Int:     return PostgresData(int: v)
-        case let v as Bool:    return PostgresData(bool: v)
-        case let v as UUID:    return PostgresData(uuid: v)
-        case let v as Date:    return PostgresData(date: v)
-        case let v as Double:  return PostgresData(double: v)
-        case let v as Float:   return PostgresData(float: v)
-        case let v as Data:    return PostgresData(bytes: [UInt8](v))
-        default:
+        guard let value = value as? any DatabaseValue else {
             throw SpectroError.invalidParameter(
                 name: "value",
                 value: String(describing: value),
-                reason: "Unsupported type for PostgreSQL parameter: \(type(of: value))"
+                reason: "Unsupported type for PostgreSQL parameter: \(type(of: value)); conform it to DatabaseValue"
             )
         }
+        return try value.toPostgresData()
     }
 }
 

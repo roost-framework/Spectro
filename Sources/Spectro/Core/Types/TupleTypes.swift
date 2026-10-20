@@ -71,18 +71,9 @@ public enum TupleMapper {
     }
 }
 
-private func extractValue<T>(from data: PostgresData) throws -> T {
-    let extracted: Any? = switch T.self {
-    case is String.Type: data.string
-    case is Int.Type:    data.int
-    case is Bool.Type:   data.bool
-    case is UUID.Type:   data.uuid
-    case is Date.Type:   data.date
-    case is Double.Type: data.double
-    case is Float.Type:  data.float
-    default:             nil
-    }
-    guard let result = extracted as? T else {
+func extractValue<T>(from data: PostgresData) throws -> T {
+    guard let type = T.self as? any DatabaseValue.Type,
+          let result = type.fromPostgresData(data) as? T else {
         throw SpectroError.resultDecodingFailed(column: "unknown", expectedType: String(describing: T.self))
     }
     return result

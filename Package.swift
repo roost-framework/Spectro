@@ -28,6 +28,7 @@ let package = Package(
         .package(url: "https://github.com/vapor/sql-kit.git", from: "3.30.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.2.0"),
         .package(url: "https://github.com/vapor/async-kit.git", from: "1.15.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.34.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "600.0.0"),
         .package(url: "https://github.com/tuist/Noora", .upToNextMajor(from: "0.15.0")),
@@ -57,6 +58,7 @@ let package = Package(
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "AsyncKit", package: "async-kit"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "Logging", package: "swift-log"),
             ],
             path: "Sources/Spectro",
             swiftSettings: [.swiftLanguageMode(.v6)]
@@ -93,6 +95,7 @@ let package = Package(
                 "Spectro",
                 "SpectroMigrations",
                 "SpectroCLI",
+                .product(name: "Logging", package: "swift-log"),
             ],
             path: "Tests/SpectroTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
