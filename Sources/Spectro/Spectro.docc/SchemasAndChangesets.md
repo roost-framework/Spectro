@@ -109,4 +109,6 @@ let updated = try await repo.update(changeset)
 
 Pass the existing record as `data` for updates and `nil` for inserts. Both ``GenericDatabaseRepo`` and ``TransactionRepo`` accept changesets, so the same validation pipeline works inside a transaction.
 
+``Changeset/optimisticLock(_:)`` guards an update against concurrent ones: it increments an integer version field, `lockVersion` by default, and throws `SpectroError.staleRecord` when the row no longer holds the loaded version.
+
 For related models and efficient loading, continue with <doc:QueriesAndRelationships>.

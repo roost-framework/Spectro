@@ -17,6 +17,9 @@ public enum SpectroError: Error, Sendable {
 
     // MARK: - Data
     case notFound(schema: String, id: String)
+    /// An update guarded by `Changeset.optimisticLock(_:)` found the record changed or deleted
+    /// since it was loaded, like Ecto's `Ecto.StaleEntryError`.
+    case staleRecord(schema: String, id: String)
     case unexpectedResultCount(expected: Int, actual: Int)
     /// `value` is the pre-formatted string description of the invalid field value.
     case invalidData(field: String, value: String?, reason: String)
@@ -81,6 +84,8 @@ extension SpectroError: LocalizedError {
 
         case .notFound(let schema, let id):
             return "\(schema) with ID '\(id)' not found"
+        case .staleRecord(let schema, let id):
+            return "\(schema) with ID '\(id)' changed or was deleted since it was loaded"
         case .unexpectedResultCount(let expected, let actual):
             return "Expected \(expected) results but got \(actual)"
         case .invalidData(let field, let value, let reason):
@@ -152,6 +157,8 @@ extension SpectroError: LocalizedError {
             return "Verify hostname, port, username, password, and database name"
         case .notFound:
             return "Verify the ID exists in the database"
+        case .staleRecord:
+            return "Reload the record and apply the change again"
         case .validationError, .changesetFailed:
             return "Check field requirements and constraints"
         case .transactionDeadlock:

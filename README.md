@@ -457,6 +457,22 @@ A mapped database failure still aborts its PostgreSQL transaction. Use `Transact
 
 For a composite constraint, declare the same name on each field that should receive an error. Constraints deferred until transaction commit are reported through `serverError`, because the individual insert or update has already returned.
 
+### Optimistic locking
+
+`optimisticLock` guards an update against concurrent ones, like Ecto's `optimistic_lock`. The update increments an integer version column and matches the row only while it holds the version that was loaded; otherwise it throws `SpectroError.staleRecord`:
+
+```swift
+// @Column var lockVersion: Int = 1, stored in a "lock_version" integer column
+let changeset = Changeset.cast(post, params: params, permitted: ["title"]).optimisticLock()
+do {
+    let updated = try await repo.update(changeset)
+} catch SpectroError.staleRecord {
+    // Someone else updated or deleted the post since it was loaded: reload and retry.
+}
+```
+
+Pass another field name, such as `.optimisticLock("revision")`, to use another column.
+
 ## Query Builder
 
 `Query<T>` is an immutable value type. Every method returns a new query, so you can safely branch and reuse intermediate queries.

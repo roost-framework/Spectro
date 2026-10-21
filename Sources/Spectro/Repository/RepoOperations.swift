@@ -129,7 +129,14 @@ struct RepoOperations: Sendable {
         return allResults
     }
 
-    func update<T: Schema>(_ schema: T.Type, id: some PrimaryKeyType, changes: [String: any Sendable]) async throws -> T {
+    /// Update the record `id`. With `lock`, only while the lock column holds its value, or
+    /// throw `SpectroError.staleRecord`.
+    func update<T: Schema>(
+        _ schema: T.Type,
+        id: some PrimaryKeyType,
+        changes: [String: any Sendable],
+        lock: (column: String, value: PostgresData)? = nil
+    ) async throws -> T {
         let metadata = await SchemaRegistry.shared.register(schema)
 
         guard let primaryKey = metadata.primaryKeyField else {
@@ -154,6 +161,10 @@ struct RepoOperations: Sendable {
         values.append(id.toPostgresData())
 
         var whereClause = "\(primaryKey.snakeCase().quoted) = $\(paramIndex)"
+        if let lock {
+            values.append(lock.value)
+            whereClause += " AND \(lock.column.quoted) = $\(paramIndex + 1)"
+        }
         // A soft-deleted record is absent here, as in get().
         if let sdf = metadata.softDeleteField { whereClause += " AND \(sdf.quoted) IS NULL" }
 
@@ -165,6 +176,7 @@ struct RepoOperations: Sendable {
             """
 
         guard let row = try await rows(sql, values).first else {
+            if lock != nil { throw SpectroError.staleRecord(schema: metadata.tableName, id: String(describing: id)) }
             throw SpectroError.notFound(schema: metadata.tableName, id: String(describing: id))
         }
         return try await T.from(row: row)
@@ -235,13 +247,23 @@ struct RepoOperations: Sendable {
             )
         }
 
-        let changes = try changeset.applyChanges()
+        var changes = try changeset.applyChanges()
         try changeset.validateConstraintDeclarations()
+        let metadata = await SchemaRegistry.shared.register(T.self)
+
+        var lock: (column: String, value: PostgresData)?
+        if let field = changeset.lockField {
+            guard let column = metadata.fields.first(where: { $0.name == field })?.databaseName,
+                  let version = changeset.extractFieldValue(from: existingData, named: field) as? Int else {
+                throw SpectroError.invalidField(schema: String(describing: T.self), field: field)
+            }
+            changes[field] = version + 1
+            lock = (column, PostgresData(int: version))
+        }
         guard !changes.isEmpty else {
             return existingData
         }
 
-        let metadata = await SchemaRegistry.shared.register(T.self)
         guard let pkFieldName = metadata.primaryKeyField else {
             throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no primary key field")
         }
@@ -253,7 +275,7 @@ struct RepoOperations: Sendable {
         }
 
         do {
-            return try await update(T.self, id: id, changes: changes)
+            return try await update(T.self, id: id, changes: changes, lock: lock)
         } catch let error as SpectroError {
             throw changeset.constraintFailure(for: error) ?? error
         }

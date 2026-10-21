@@ -45,6 +45,9 @@ public struct Changeset<T: Schema>: Sendable {
 
     private var constraintDeclarations: [ConstraintDeclaration] = []
 
+    /// The version field of `optimisticLock(_:)`.
+    private(set) var lockField: String?
+
     /// The set of field names that were permitted during `cast`.
     public let permitted: Set<String>
 
@@ -157,6 +160,26 @@ public struct Changeset<T: Schema>: Sendable {
     public func addError(_ field: String, message: String) -> Changeset<T> {
         var copy = self
         copy.errors[field, default: []].append(message)
+        return copy
+    }
+
+    // MARK: - Optimistic Locking
+
+    /// Guard an update against concurrent ones, like Ecto's `optimistic_lock`. The update
+    /// increments the integer `field` and matches the row only while it still holds the
+    /// loaded value; otherwise it throws `SpectroError.staleRecord`.
+    ///
+    /// ```swift
+    /// // @Column var lockVersion: Int = 1, with a "lock_version" integer column
+    /// let updated = try await repo.update(
+    ///     Changeset.cast(post, params: params, permitted: ["title"]).optimisticLock()
+    /// )
+    /// ```
+    ///
+    /// The update runs even without other changes, so it still increments the version.
+    public func optimisticLock(_ field: String = "lockVersion") -> Changeset<T> {
+        var copy = self
+        copy.lockField = field
         return copy
     }
 
@@ -481,7 +504,7 @@ public struct Changeset<T: Schema>: Sendable {
     }
 
     /// Extract a field value from a schema instance by property name using Mirror.
-    private func extractFieldValue(from instance: T, named field: String) -> Any? {
+    func extractFieldValue(from instance: T, named field: String) -> Any? {
         let mirror = Mirror(reflecting: instance)
         for child in mirror.children {
             guard let label = child.label else { continue }

@@ -11,6 +11,7 @@
 - Add `Query.recursive(_:)`, a `WITH RECURSIVE` query that follows rows from the query's rows, such as a tree's descendants or ancestors. It skips soft-deleted rows and ends on cycles.
 - Select SQL expressions with `QueryBuilder.expression(_:as:)`, such as aggregates and window functions, alongside columns: `select` takes any `Selection`, a `QueryField` of a `DatabaseValue` type or an `SQLExpression`. A projection of a query with `groupBy` and `having` is now grouped, one result per group, and its `count()` counts the groups; the grouping was ignored.
 - Declare nullable foreign keys with `@ForeignKey var editorId: UUID?`. `ForeignKey` now takes a `ForeignKeyValue`: a `PrimaryKeyType`, or an `Optional` of one. A nil key stores NULL and preloads no record.
+- Add `Changeset.optimisticLock(_:)`, like Ecto's `optimistic_lock`. An update increments the integer version field and matches the row only while it holds the loaded version; otherwise it throws the new `SpectroError.staleRecord`. Add `staleRecord` to exhaustive `SpectroError` switches.
 - Add `transaction(isolation:_:)` to `GenericDatabaseRepo`, `Spectro`, and `DatabaseConnection`, with `TransactionIsolation` levels `readCommitted`, `repeatableRead`, and `serializable`.
 - Add `insertAll(_:onConflict:includePrimaryKey:)` and `insert(_:onConflict:includePrimaryKey:)` with `ConflictAction.nothing(on:)` and `.replace(on:columns:)`, like Ecto's `on_conflict`. They return the records inserted or updated.
 - Add `Repo.reload(_:)` for one record or many, in one query, like Ecto's `Repo.reload`.
