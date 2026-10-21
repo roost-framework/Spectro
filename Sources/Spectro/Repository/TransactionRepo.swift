@@ -74,11 +74,13 @@ public actor TransactionRepo: Repo {
     }
 
     public func insert<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.insert(changeset)
+        let changeset = try await changeset.prepared(using: self)
+        return try await changeset.writeAssociations(of: operations.insert(changeset), using: self)
     }
 
     public func update<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.update(changeset)
+        let changeset = try await changeset.prepared(using: self)
+        return try await changeset.writeAssociations(of: operations.update(changeset), using: self)
     }
 
     public func transaction<T: Sendable>(_ work: @escaping @Sendable (any Repo) async throws -> T) async throws -> T {

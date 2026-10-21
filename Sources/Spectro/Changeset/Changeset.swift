@@ -41,12 +41,18 @@ public struct Changeset<T: Schema>: Sendable {
     public private(set) var changes: [String: any Sendable]
 
     /// Accumulated validation errors (field name → error messages).
-    public private(set) var errors: [String: [String]]
+    public internal(set) var errors: [String: [String]]
 
     private var constraintDeclarations: [ConstraintDeclaration] = []
 
     /// The version field of `optimisticLock(_:)`.
     private(set) var lockField: String?
+
+    /// The functions of `prepareChanges(_:)`, in the order they were added.
+    var preparations: [@Sendable (Changeset<T>, any Repo) async throws -> Changeset<T>] = []
+
+    /// Writes of `castAssoc`, run once the record is saved, which load the relationship into it.
+    var associationWrites: [@Sendable (T, any Repo) async throws -> T] = []
 
     /// The set of field names that were permitted during `cast`.
     public let permitted: Set<String>

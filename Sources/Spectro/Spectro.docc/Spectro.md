@@ -46,6 +46,7 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 ### Validate changes
 
 - ``Changeset``
+- ``OnReplace``
 - ``ChangesetErrors``
 
 ### Build queries

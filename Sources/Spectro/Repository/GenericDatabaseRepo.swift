@@ -105,7 +105,10 @@ public actor GenericDatabaseRepo: Repo {
     /// let user = try await repo.insert(cs)
     /// ```
     public func insert<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.insert(changeset)
+        // Preparations and associations write in one transaction with the record. An invalid
+        // changeset throws its validation error without one.
+        guard changeset.needsTransaction, changeset.isValid else { return try await operations.insert(changeset) }
+        return try await transaction { tx in try await tx.insert(changeset) }
     }
 
     /// Update an existing record from a validated changeset.
@@ -119,6 +122,7 @@ public actor GenericDatabaseRepo: Repo {
     /// let updated = try await repo.update(cs)
     /// ```
     public func update<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.update(changeset)
+        guard changeset.needsTransaction, changeset.isValid else { return try await operations.update(changeset) }
+        return try await transaction { tx in try await tx.update(changeset) }
     }
 }

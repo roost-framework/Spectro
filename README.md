@@ -473,6 +473,29 @@ do {
 
 Pass another field name, such as `.optimisticLock("revision")`, to use another column.
 
+### Nested records and preparations
+
+`castAssoc` casts nested params into a has-many or has-one relationship, like Ecto's `cast_assoc`. Inserting or updating the changeset writes the related records, with their foreign key, in one transaction, and returns the record with the relationship loaded:
+
+```swift
+let changeset = Changeset<User>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
+    .castAssoc(\.$posts, params: [["title": "Hello"], ["title": "World"]]) { post, params in
+        Changeset.cast(post, params: params, permitted: ["title"]).validateRequired(["title"])
+    }
+let user = try await repo.insert(changeset)
+```
+
+Errors of the related changesets join the record's as `"posts[1].title"`. To update a relationship, preload it: params carrying a loaded record's primary key update it, others insert a record, and `onReplace` decides what happens to the loaded records left out, `.markAsInvalid` by default or `.delete`.
+
+`prepareChanges` runs a function in the same transaction just before the write, like Ecto's `prepare_changes`, for instance to update a counter. It is skipped for an invalid changeset:
+
+```swift
+.prepareChanges { changeset, tx in
+    let count = try await tx.query(Post.self).where { $0.userId == user.id }.count()
+    return changeset.putChange("postCount", value: count)
+}
+```
+
 ## Query Builder
 
 `Query<T>` is an immutable value type. Every method returns a new query, so you can safely branch and reuse intermediate queries.
