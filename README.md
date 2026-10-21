@@ -195,7 +195,7 @@ struct User {
 | `@Column<T>` | Regular column, optional name override | `@Column("display_name") var name: String` |
 | `@Timestamp` | Date column | `@Timestamp var createdAt: Date` |
 | `@SoftDelete` | Nullable deletion timestamp | `@SoftDelete var deletedAt: Date?` |
-| `@ForeignKey<T>` | Foreign key reference, optional name override | `@ForeignKey var userId: UUID` |
+| `@ForeignKey<T>` | Foreign key reference, optional name override; `Optional` for a nullable key | `@ForeignKey var userId: UUID`, `@ForeignKey var editorId: UUID?` |
 | `@HasMany<T>` | One-to-many relationship, optional FK binding | `@HasMany(foreignKey: "authorId") var posts: [Post]` |
 | `@HasOne<T>` | One-to-one relationship | `@HasOne var profile: Profile?` |
 | `@BelongsTo<T>` | Inverse of HasMany/HasOne | `@BelongsTo var user: User?` |

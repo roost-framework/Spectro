@@ -75,6 +75,7 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 ### Load relationships
 
 - ``ForeignKey``
+- ``ForeignKeyValue``
 - ``HasMany``
 - ``HasOne``
 - ``BelongsTo``

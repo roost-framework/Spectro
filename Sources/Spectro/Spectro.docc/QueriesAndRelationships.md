@@ -96,7 +96,7 @@ struct Post {
 }
 ```
 
-``ForeignKey`` describes the stored key, while ``HasMany``, ``HasOne``, ``BelongsTo``, and ``ManyToMany`` describe loading relationships. Create actual foreign-key constraints and indexes through migrations.
+``ForeignKey`` describes the stored key, `Optional` for a nullable one, such as `@ForeignKey var editorId: UUID?`, while ``HasMany``, ``HasOne``, ``BelongsTo``, and ``ManyToMany`` describe loading relationships. Create actual foreign-key constraints and indexes through migrations.
 
 ### Preload related records
 

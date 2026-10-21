@@ -1,11 +1,22 @@
 import Foundation
 import PostgresKit
 
+/// Types a `@ForeignKey` can hold: a `PrimaryKeyType`, or an `Optional` of one for a
+/// nullable foreign key.
+public protocol ForeignKeyValue: DatabaseValue, Hashable {
+    /// The value of a foreign key that was not set.
+    static var foreignKeyDefault: Self { get }
+}
+
+extension Optional: ForeignKeyValue where Wrapped: PrimaryKeyType {
+    public static var foreignKeyDefault: Wrapped? { nil }
+}
+
 /// Types that can serve as primary keys in Spectro schemas.
 ///
 /// Conform to this protocol to use a type as an `@ID` or `@ForeignKey` value.
 /// Built-in conformances: `UUID`, `Int`, `String`.
-public protocol PrimaryKeyType: DatabaseValue, Hashable, Codable {
+public protocol PrimaryKeyType: ForeignKeyValue, Codable {
     /// Converts this value to `PostgresData` for query parameters.
     func toPostgresData() -> PostgresData
 
@@ -14,6 +25,10 @@ public protocol PrimaryKeyType: DatabaseValue, Hashable, Codable {
 
     /// The corresponding `FieldType` for schema metadata.
     static var fieldType: FieldType { get }
+}
+
+extension PrimaryKeyType {
+    public static var foreignKeyDefault: Self { defaultValue }
 }
 
 // MARK: - Built-in Conformances

@@ -520,7 +520,9 @@ public struct PreloadQuery<T: Schema>: Sendable {
                 return (v.primaryKeyHashable, v.primaryKeyPostgresData)
             }
             if let v = child.value as? any ForeignKeyWrapperProtocol {
-                return (v.foreignKeyHashable, v.foreignKeyPostgresData)
+                // A nil foreign key refers to no record.
+                let data = v.foreignKeyPostgresData
+                return data.value == nil ? nil : (v.foreignKeyHashable, data)
             }
             var value = Mirror(reflecting: child.value).children.first { $0.label == "wrappedValue" }?.value ?? child.value
             let optional = Mirror(reflecting: value)
