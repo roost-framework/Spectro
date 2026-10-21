@@ -9,6 +9,13 @@ struct AssocAuthor {
     @Column var postCount: Int = 0
     @HasMany var assocPosts: [AssocPost]
     @HasOne var assocProfile: AssocProfile?
+    @ManyToMany(junctionTable: "assoc_author_tags") var assocTags: [AssocTag]
+}
+
+@Schema("assoc_tags")
+struct AssocTag {
+    @ID var id: UUID
+    @Column var name: String
 }
 
 @Schema("assoc_posts")
@@ -32,12 +39,14 @@ extension DatabaseIntegrationTests {
 struct ChangesetAssociationTests {
     private func withTables(_ body: (GenericDatabaseRepo) async throws -> Void) async throws {
         let repo = try await TestDatabase.sharedRepo()
-        for table in ["assoc_profiles", "assoc_posts", "assoc_authors"] {
+        for table in ["assoc_author_tags", "assoc_tags", "assoc_profiles", "assoc_posts", "assoc_authors"] {
             try await repo.executeRawSQL("DROP TABLE IF EXISTS \(table.quoted)")
         }
         try await repo.executeRawSQL(#"CREATE TABLE "assoc_authors" ("id" UUID PRIMARY KEY DEFAULT gen_random_uuid(), "name" TEXT NOT NULL, "post_count" INTEGER NOT NULL DEFAULT 0)"#)
         try await repo.executeRawSQL(#"CREATE TABLE "assoc_posts" ("id" UUID PRIMARY KEY DEFAULT gen_random_uuid(), "title" TEXT NOT NULL UNIQUE, "assoc_author_id" UUID NOT NULL REFERENCES "assoc_authors"("id"))"#)
         try await repo.executeRawSQL(#"CREATE TABLE "assoc_profiles" ("id" UUID PRIMARY KEY DEFAULT gen_random_uuid(), "bio" TEXT NOT NULL, "assoc_author_id" UUID NOT NULL REFERENCES "assoc_authors"("id"))"#)
+        try await repo.executeRawSQL(#"CREATE TABLE "assoc_tags" ("id" UUID PRIMARY KEY DEFAULT gen_random_uuid(), "name" TEXT NOT NULL UNIQUE)"#)
+        try await repo.executeRawSQL(#"CREATE TABLE "assoc_author_tags" ("assoc_author_id" UUID NOT NULL REFERENCES "assoc_authors"("id"), "assoc_tag_id" UUID NOT NULL REFERENCES "assoc_tags"("id"), PRIMARY KEY ("assoc_author_id", "assoc_tag_id"))"#)
         try await body(repo)
     }
 
@@ -150,9 +159,98 @@ struct ChangesetAssociationTests {
             #expect(replaced.assocProfile?.id != author.assocProfile?.id)
             #expect(try await repo.query(AssocProfile.self).count() == 1)
 
-            let manyToMany = Changeset<NestAuthor>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
-                .castAssoc(\.$genres, params: [], with: { genre, params in Changeset.cast(genre, params: params, permitted: ["name"]) })
-            #expect(manyToMany.errors["genres"] == ["is not a has-many relationship"])
+            let belongsTo = Changeset<NestBook>.cast(nil, params: [:], permitted: [])
+                .castAssoc(\.$nestAuthor, params: [:], with: { author, params in Changeset.cast(author, params: params, permitted: ["name"]) })
+            #expect(belongsTo.errors["nestAuthor"] == ["is not a has-one relationship"])
+        }
+    }
+
+    private func tag(_ tag: AssocTag?, _ params: [String: any Sendable]) -> Changeset<AssocTag> {
+        Changeset.cast(tag, params: params, permitted: ["name"]).validateRequired(["name"])
+    }
+
+    private func tagNames(of author: AssocAuthor, in repo: GenericDatabaseRepo) async throws -> [String] {
+        let loaded = try await repo.query(AssocAuthor.self).where { $0.id == author.id }.preload(\.$assocTags).first()
+        return (loaded?.assocTags.map(\.name) ?? []).sorted()
+    }
+
+    @Test("Many-to-many casts insert records and join rows, and puts link and unlink stored records")
+    func manyToMany() async throws {
+        try await withTables { repo in
+            let created = try await repo.insert(
+                Changeset<AssocAuthor>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
+                    .castAssoc(\.$assocTags, params: [["name": "swift"], ["name": "sql"]], with: tag)
+            )
+            #expect(created.assocTags.map(\.name) == ["swift", "sql"])
+            #expect(try await tagNames(of: created, in: repo) == ["sql", "swift"])
+
+            let elixir = try await repo.insert(AssocTag(name: "elixir"))
+            let author = try await repo.query(AssocAuthor.self).where { $0.id == created.id }.preload(\.$assocTags).first()!
+            let sql = try #require(author.assocTags.first { $0.name == "sql" })
+
+            let strict = Changeset.cast(author, params: [:], permitted: []).putAssoc(\.$assocTags, [sql, elixir])
+            #expect(strict.errors["assocTags"] == ["is invalid"])
+
+            let updated = try await repo.update(
+                Changeset.cast(author, params: [:], permitted: []).putAssoc(\.$assocTags, [sql, elixir], onReplace: .delete)
+            )
+            #expect(updated.assocTags.map(\.name) == ["sql", "elixir"])
+            #expect(try await tagNames(of: author, in: repo) == ["elixir", "sql"])
+            // Replacing a many-to-many record deletes its join row, not the record.
+            #expect(try await repo.query(AssocTag.self).count() == 3)
+
+            let reloaded = try await repo.query(AssocAuthor.self).where { $0.id == created.id }.preload(\.$assocTags).first()!
+            let edited = try await repo.update(
+                Changeset.cast(reloaded, params: [:], permitted: [])
+                    .putAssoc(\.$assocTags, [tag(sql, ["name": "postgres"]), tag(nil, ["name": "new"])], onReplace: .delete)
+            )
+            #expect(edited.assocTags.map(\.name) == ["postgres", "new"])
+            #expect(try await tagNames(of: author, in: repo) == ["new", "postgres"])
+
+            let invalid = Changeset.cast(reloaded, params: [:], permitted: [])
+                .putAssoc(\.$assocTags, [tag(nil, ["name": ""])], onReplace: .delete)
+            #expect(invalid.errors["assocTags[0].name"] == ["can't be blank"])
+            // A later put replaces an earlier one, with its errors.
+            #expect(invalid.putAssoc(\.$assocTags, [elixir], onReplace: .delete).isValid)
+
+            let twice = try await repo.insert(
+                Changeset<AssocAuthor>.cast(nil, params: ["name": "Bo"], permitted: ["name"])
+                    .putAssoc(\.$assocTags, [sql])
+                    .putAssoc(\.$assocTags, [elixir, elixir])
+                    .putAssoc(\.$assocProfile, profile(nil, ["bio": "First"]))
+                    .putAssoc(\.$assocProfile, profile(nil, ["bio": "Second"]))
+            )
+            #expect(try await tagNames(of: twice, in: repo) == ["elixir"])
+            #expect(try await repo.query(AssocProfile.self).where { $0.assocAuthorId == twice.id }.all().map(\.bio) == ["Second"])
+        }
+    }
+
+    @Test("Has-many and has-one puts move stored records and insert changesets")
+    func puts() async throws {
+        try await withTables { repo in
+            let ana = try await repo.insert(AssocAuthor(name: "Ana", postCount: 0))
+            let bo = try await repo.insert(AssocAuthor(name: "Bo", postCount: 0))
+            let moved = try await repo.insert(AssocPost(title: "Moved", assocAuthorId: bo.id))
+
+            let author = try await repo.query(AssocAuthor.self).where { $0.id == ana.id }
+                .preload(\.$assocPosts).preload(\.$assocProfile).first()!
+            let updated = try await repo.update(
+                Changeset.cast(author, params: [:], permitted: [])
+                    .putAssoc(\.$assocPosts, [moved])
+                    .putAssoc(\.$assocProfile, profile(nil, ["bio": "Hi"]))
+            )
+            #expect(updated.assocPosts.map(\.assocAuthorId) == [ana.id])
+            #expect(try await repo.reload(moved)?.assocAuthorId == ana.id)
+            #expect(updated.assocProfile?.bio == "Hi")
+
+            let withProfile = try await repo.query(AssocAuthor.self).where { $0.id == ana.id }.preload(\.$assocProfile).first()!
+            let strict = Changeset.cast(withProfile, params: [:], permitted: []).putAssoc(\.$assocProfile, nil as AssocProfile?)
+            #expect(strict.errors["assocProfile"] == ["is invalid"])
+            let cleared = try await repo.update(
+                Changeset.cast(withProfile, params: [:], permitted: []).putAssoc(\.$assocProfile, nil as AssocProfile?, onReplace: .delete)
+            )
+            #expect(cleared.assocProfile == nil)
+            #expect(try await repo.query(AssocProfile.self).count() == 0)
         }
     }
 

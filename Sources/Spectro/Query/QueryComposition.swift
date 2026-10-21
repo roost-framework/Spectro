@@ -161,6 +161,92 @@ extension Query {
     }
 }
 
+// MARK: - Lateral Joins
+
+extension Query {
+    /// Join the rows `subquery` selects for each row: `INNER JOIN LATERAL`, like Ecto's
+    /// lateral joins. The subquery refers to the row through the builder's fields.
+    ///
+    /// ```swift
+    /// // Each author with their three most viewed posts
+    /// let top = try await repo.query(Author.self)
+    ///     .joinLateral { author in
+    ///         repo.query(Post.self).where { $0.authorId == author.id }.orderBy({ $0.views }, .desc).limit(3)
+    ///     }
+    ///     .executeJoin(with: Post.self)
+    ///     .all()
+    /// ```
+    ///
+    /// The joined rows go by the subquery's table name, or by `alias`, in filters, ordering,
+    /// and `executeJoin(with:as:)`. The subquery keeps its own soft-delete filter; call
+    /// `withDeleted()` on it to include deleted rows. It cannot lock rows. As with
+    /// `exists(_:)`, a subquery of the queried table itself cannot refer to the outer row.
+    public func joinLateral<U: Schema>(as alias: String? = nil, _ subquery: (QueryBuilder<T>) -> Query<U>) -> Query<T> {
+        lateral(.inner, alias: alias, subquery)
+    }
+
+    /// `joinLateral(as:_:)` that keeps rows for which `subquery` selects nothing: `LEFT JOIN LATERAL`.
+    public func leftJoinLateral<U: Schema>(as alias: String? = nil, _ subquery: (QueryBuilder<T>) -> Query<U>) -> Query<T> {
+        lateral(.left, alias: alias, subquery)
+    }
+
+    private func lateral<U: Schema>(_ type: JoinType, alias: String?, _ subquery: (QueryBuilder<T>) -> Query<U>) -> Query<T> {
+        let rows = subquery(QueryBuilder<T>())
+        var source = QuerySource(sql: rows.selectSQL(), parameters: rows.parameters)
+        do {
+            try rows.validateJoins()
+            // Counts and aggregates drop the outer query's lock, but could not drop this one.
+            guard rows.lockClause == nil else { throw SpectroError.invalidQuery("A lateral subquery cannot lock rows") }
+        } catch {
+            source.error = error
+        }
+        var copy = self
+        copy.joins.append(JoinClause(
+            type: type, table: U.tableName, alias: alias, softDeleteColumn: nil,
+            condition: "TRUE", parameters: source.parameters, source: source
+        ))
+        return copy
+    }
+}
+
+// MARK: - Window Filters
+
+extension Query {
+    /// Keep the rows for which `condition` holds, a condition that may use window functions,
+    /// as SQL's `QUALIFY` does, which PostgreSQL lacks. Fields become qualified columns and
+    /// values bound parameters, as in `SQLFragment`.
+    ///
+    /// ```swift
+    /// // The two most viewed posts of each author
+    /// let top = try await repo.query(Post.self)
+    ///     .qualify { "row_number() OVER (PARTITION BY \($0.authorId) ORDER BY \($0.views) DESC) <= \(2)" }
+    ///     .orderBy { $0.title }
+    ///     .all()
+    /// ```
+    ///
+    /// The window functions see the rows the query selects so far, after its filters, joins,
+    /// distinct, ordering, and limit. Clauses added to the result apply to the remaining rows,
+    /// so add ordering and limits after it.
+    public func qualify(_ condition: (QueryBuilder<T>) -> SQLFragment) -> Query<T> {
+        let fragment = condition(QueryBuilder<T>())
+        let table = T.tableName.quoted
+        let columns = SchemaRegistry.extractMetadata(from: T.self).fields.map(\.databaseName.quoted).joined(separator: ", ")
+        // PostgreSQL computes window functions before DISTINCT and LIMIT, so compute them over
+        // the rows those select; without them, the condition may also refer to joined tables.
+        var rows = self
+        if distinctColumns != nil || limitValue != nil || offsetValue != nil {
+            rows = Query(schema: T.self, executor: executor)
+            rows.source = QuerySource(sql: selectSQL(), parameters: parameters)
+        }
+        let ranked = rows.selectSQL(selectClause: "\(table).*, (\(fragment.sql)) AS \"spectro_qualify\"")
+        return composed(
+            sql: "SELECT \(columns) FROM (\(ranked)) AS \(table) WHERE \"spectro_qualify\"",
+            parameters: fragment.parameters + rows.parameters,
+            validating: [self]
+        )
+    }
+}
+
 // MARK: - Existence
 
 extension Query {

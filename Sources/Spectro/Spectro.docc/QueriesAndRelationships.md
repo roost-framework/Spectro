@@ -48,9 +48,16 @@ let subtree = try await repo.query(Category.self)
     .where { $0.id == rootID }
     .recursive { $0.left.parentId == $0.right.id }
     .all()
+let latestPosts = try await repo.query(User.self)
+    .leftJoinLateral { user in repo.query(Post.self).where { $0.userId == user.id }.orderBy({ $0.createdAt }, .desc).limit(3) }
+    .executeJoin(with: Post.self)
+    .all()
+let topTwo = try await repo.query(Post.self)
+    .qualify { "row_number() OVER (PARTITION BY \($0.userId) ORDER BY \($0.views) DESC) <= \(2)" }
+    .all()
 ```
 
-Projections select columns and SQL expressions, such as aggregates and window functions, with ``QueryBuilder/expression(_:as:)``; a projection of a grouped query returns one result per group:
+Projections select columns and SQL expressions, such as aggregates and window functions, with ``QueryBuilder/expression(_:as:)``; a projection of a grouped query returns one result per group. Five or more selections return a Swift tuple:
 
 ```swift
 let totals = try await repo.query(Post.self)
@@ -59,7 +66,7 @@ let totals = try await repo.query(Post.self)
     .all()
 ```
 
-``Query/distinct()`` and ``Query/distinct(_:)`` remove duplicate rows or keep the first row per value. ``QueryCondition/exists(_:)`` and `in(_:)` take subqueries, which may refer to the outer query's fields. Fields also compare with each other, as in `$0.likes > $0.views`. ``Query/union(_:)`` and the other set operations combine queries that keep their own clauses, and ``Query/recursive(_:)`` follows rows like a recursive CTE. ``Query/exists()`` tests for any matching row, and ``Query/batches(of:)`` reads a large result in primary key batches.
+``Query/distinct()`` and ``Query/distinct(_:)`` remove duplicate rows or keep the first row per value. ``QueryCondition/exists(_:)`` and `in(_:)` take subqueries, which may refer to the outer query's fields. Fields also compare with each other, as in `$0.likes > $0.views`. ``Query/union(_:)`` and the other set operations combine queries that keep their own clauses, and ``Query/recursive(_:)`` follows rows like a recursive CTE. ``Query/joinLateral(as:_:)`` and ``Query/leftJoinLateral(as:_:)`` join the rows a subquery selects for each row, and ``Query/qualify(_:)`` filters on window functions. ``Query/exists()`` tests for any matching row, and ``Query/batches(of:)`` reads a large result in primary key batches.
 
 ### Update, delete, and lock many rows
 

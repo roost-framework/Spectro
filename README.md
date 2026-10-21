@@ -39,7 +39,7 @@ Browse guides and searchable API reference in the [documentation for the latest 
 - **Type-safe aggregates** -- `.sum()`, `.avg()`, `.min()`, `.max()`, `.count()` with `GROUP BY` and `HAVING` support, and typed grouped projections with SQL expressions and window functions
 - **PostgreSQL column types** -- `Decimal`, arrays, `jsonb`, `bytea`, raw-value enums, and your own types through `DatabaseValue`
 - **SQL fragments** -- raw SQL in filters, ordering, and whole statements, with qualified fields and bound values, like Ecto's `fragment`
-- **Query composition** -- `DISTINCT` and `DISTINCT ON`, `IN` and `EXISTS` subqueries, unions, intersections, differences, recursive queries, and column comparisons
+- **Query composition** -- `DISTINCT` and `DISTINCT ON`, `IN` and `EXISTS` subqueries, unions, intersections, differences, recursive queries, lateral joins, window filters, and column comparisons
 - **Upsert and bulk insert** -- `ON CONFLICT` upserts, multi-row inserts that skip or update conflicting records, with automatic batching
 - **Reloads and batches** -- reload records in one query, and read large results in primary key batches
 - **Bulk updates, deletes, and row locks** -- `updateAll`, `deleteAll`, and `FOR UPDATE … SKIP LOCKED`
@@ -488,7 +488,7 @@ Pass another field name, such as `.optimisticLock("revision")`, to use another c
 
 ### Nested records and preparations
 
-`castAssoc` casts nested params into a has-many or has-one relationship, like Ecto's `cast_assoc`. Inserting or updating the changeset writes the related records, with their foreign key, in one transaction, and returns the record with the relationship loaded:
+`castAssoc` casts nested params into a has-many, has-one, or many-to-many relationship, like Ecto's `cast_assoc`. Inserting or updating the changeset writes the related records, with their foreign key or join rows, in one transaction, and returns the record with the relationship loaded:
 
 ```swift
 let changeset = Changeset<User>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
@@ -498,7 +498,16 @@ let changeset = Changeset<User>.cast(nil, params: ["name": "Ana"], permitted: ["
 let user = try await repo.insert(changeset)
 ```
 
-Errors of the related changesets join the record's as `"posts[1].title"`. To update a relationship, preload it: params carrying a loaded record's primary key update it, others insert a record, and `onReplace` decides what happens to the loaded records left out, `.markAsInvalid` by default or `.delete`.
+Errors of the related changesets join the record's as `"posts[1].title"`. To update a relationship, preload it: params carrying a loaded record's primary key update it, others insert a record, and `onReplace` decides what happens to the loaded records left out, `.markAsInvalid` by default or `.delete`. For a many-to-many relationship, `.delete` deletes only the join row, as in Ecto.
+
+`putAssoc` sets a relationship to records already stored, like Ecto's `put_assoc`. It inserts the missing join rows of a many-to-many relationship, or sets the foreign key of has-many and has-one records that belong elsewhere. Pass changesets instead of records to insert or change related records in the same write:
+
+```swift
+let tags = try await repo.query(Tag.self).where { $0.name.in(["swift", "sql"]) }.all()
+let post = try await repo.update(
+    Changeset.cast(loadedPost, params: [:], permitted: []).putAssoc(\.$tags, tags, onReplace: .delete)
+)
+```
 
 `prepareChanges` runs a function in the same transaction just before the write, like Ecto's `prepare_changes`, for instance to update a counter. It is skipped for an invalid changeset:
 
@@ -738,6 +747,28 @@ let subtree = try await repo.query(Category.self)
 ```
 
 A row found again is not followed again, so cycles end. Soft-deleted rows are not reached unless the query uses `withDeleted()`.
+
+### Lateral joins and window filters
+
+`joinLateral` and `leftJoinLateral` join the rows a subquery selects for each row, such as each author's latest posts. The subquery refers to the row through the closure's builder, and the joined rows go by the subquery's table name, or by `as:`:
+
+```swift
+let latest = try await repo.query(User.self)
+    .leftJoinLateral { user in
+        repo.query(Post.self).where { $0.userId == user.id }.orderBy({ $0.createdAt }, .desc).limit(3)
+    }
+    .executeJoin(with: Post.self)
+    .all()   // [(User, Post?)]
+```
+
+`qualify` keeps the rows for which a condition that may use window functions holds, like SQL's `QUALIFY`, which PostgreSQL lacks. Add ordering and limits after it:
+
+```swift
+let top = try await repo.query(Post.self)
+    .qualify { "row_number() OVER (PARTITION BY \($0.userId) ORDER BY \($0.views) DESC) <= \(2)" }
+    .orderBy { $0.title }
+    .all()
+```
 
 ### Query inspection
 
@@ -1060,6 +1091,12 @@ let triples: [Tuple3<String, String, Int>] = try await repo.query(User.self)
 let quads: [Tuple4<UUID, String, String, Bool>] = try await repo.query(User.self)
     .select { ($0.id, $0.name, $0.email, $0.isActive) }
     .all()
+
+// Five fields or more, as Swift tuples
+let rows: [(UUID, String, String, Int, Bool)] = try await repo.query(User.self)
+    .select { ($0.id, $0.name, $0.email, $0.age, $0.isActive) }
+    .all()
+// Access: rows[0].0 (id), rows[0].4 (isActive)
 ```
 
 Select SQL expressions too, such as aggregates of a grouped query or window functions. Each expression decodes as the type you give, an `Optional` when it can be NULL:
