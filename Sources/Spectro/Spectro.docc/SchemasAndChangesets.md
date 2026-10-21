@@ -111,6 +111,8 @@ Pass the existing record as `data` for updates and `nil` for inserts. Both ``Gen
 
 `castAssoc(_:params:foreignKey:onReplace:with:)` casts nested params into a has-many or has-one relationship, written with the record in one transaction, and ``Changeset/prepareChanges(_:)`` runs a function in that transaction just before the write.
 
-``Changeset/optimisticLock(_:)`` guards an update against concurrent ones: it increments an integer version field, `lockVersion` by default, and throws `SpectroError.staleRecord` when the row no longer holds the loaded version.
+Every field name also has a key path form, such as `Changeset.cast(nil, params: params, permitting: \.name, \.email)`, `.validateRequired(\.name)`, `.validateInclusion(\.role, in: [.member])`, and `.putChange(\.isActive, true)`, so a renamed property fails to compile and values have the field's type.
+
+`optimisticLock(_:)` guards an update against concurrent ones: it increments an integer version field, `lockVersion` by default, and throws `SpectroError.staleRecord` when the row no longer holds the loaded version.
 
 For related models and efficient loading, continue with <doc:QueriesAndRelationships>.

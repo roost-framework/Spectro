@@ -531,7 +531,7 @@ public struct Changeset<T: Schema>: Sendable {
     }
 
     /// Check if a value is nil (handles Optional<T> erased to Any).
-    private func isNilAny(_ value: Any) -> Bool {
+    func isNilAny(_ value: Any) -> Bool {
         let mirror = Mirror(reflecting: value)
         return mirror.displayStyle == .optional && mirror.children.isEmpty
     }

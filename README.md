@@ -430,6 +430,18 @@ Only permitted schema fields are kept, using Swift property names even when a co
 
 Pass an existing record instead of `nil` for an update. Direct `Changeset` initialization and `putChange` accept trusted application values without casting.
 
+Name fields with key paths instead of strings, so a renamed property fails to compile and values have the field's type:
+
+```swift
+let changeset = Changeset<User>.cast(nil, params: params, permitting: \.name, \.email, \.role)
+    .validateRequired(\.name, \.email)
+    .validateLength(\.name, min: 2)
+    .validateInclusion(\.role, in: [.member, .admin])
+    .validateCustom(\.age) { $0 >= 18 ? nil : "must be an adult" }
+    .putChange(\.isActive, true)
+let email: String? = changeset.getField(\.email)
+```
+
 ### Database constraint errors
 
 Declare the database constraints you want to report as field errors. PostgreSQL enforces the constraint during the write, including under concurrent writes:
