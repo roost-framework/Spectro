@@ -159,24 +159,26 @@ public struct PreloadQuery<T: Schema>: Sendable {
             }
         }
         // Queries the junction table, then the related table, grouping results back to parents.
-        let junctionTable = relInfo.junctionTable ?? ""
-        let parentFK = (relInfo.parentForeignKey?.isEmpty == false)
-            ? relInfo.parentForeignKey!
-            : conventionalForeignKey(for: T.self)
-        let relatedFK = (relInfo.relatedForeignKey?.isEmpty == false)
-            ? relInfo.relatedForeignKey!
-            : conventionalForeignKey(for: Related.self)
+        let junction = junction(relInfo, to: Related.self)
         return { entities, repo in
             try await batchLoadManyToMany(
                 entities: entities,
                 keyPath: box.value,
-                junctionTable: junctionTable,
-                parentFK: parentFK,
-                relatedFK: relatedFK,
+                junctionTable: junction.table,
+                parentFK: junction.parentColumn,
+                relatedFK: junction.relatedColumn,
                 repo: repo,
                 customize: customize
             )
         }
+    }
+
+    /// The junction table of a many-to-many relationship, with conventional column names
+    /// for the foreign keys it does not name.
+    static func junction<Related: Schema>(_ relInfo: RelationshipInfo, to related: Related.Type) -> Junction {
+        let parentFK = relInfo.parentForeignKey.flatMap { $0.isEmpty ? nil : $0 } ?? conventionalForeignKey(for: T.self)
+        let relatedFK = relInfo.relatedForeignKey.flatMap { $0.isEmpty ? nil : $0 } ?? conventionalForeignKey(for: Related.self)
+        return Junction(table: relInfo.junctionTable ?? "", parentColumn: parentFK.snakeCase(), relatedColumn: relatedFK.snakeCase())
     }
 
     /// Creates a preloader for a has-one or belongs-to relationship.
@@ -233,8 +235,8 @@ public struct PreloadQuery<T: Schema>: Sendable {
         // Step 1: Query junction table for all rows matching parent IDs
         let junctionRows = try await batchFetchJunction(
             junctionTable: junctionTable,
-            whereColumn: parentFK.snakeCase(),
-            relatedColumn: relatedFK.snakeCase(),
+            whereColumn: parentFK,
+            relatedColumn: relatedFK,
             keyTypes: (parentKeyType, relatedKeyType),
             inParams: parentParams,
             repo: repo

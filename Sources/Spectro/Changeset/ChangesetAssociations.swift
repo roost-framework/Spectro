@@ -1,18 +1,20 @@
 import Foundation
+@preconcurrency import PostgresNIO
 
-/// What `castAssoc` does with a loaded related record that the params leave out,
-/// like Ecto's `on_replace`.
+/// What `castAssoc` and `putAssoc` do with a loaded related record left out, like Ecto's
+/// `on_replace`.
 public enum OnReplace: Sendable {
     /// Add an error to the relationship, so the changeset is invalid.
     case markAsInvalid
-    /// Delete the record.
+    /// Delete the record. For a many-to-many relationship, delete only its join row, as Ecto does.
     case delete
 }
 
 // MARK: - Associations
 
 extension Changeset {
-    /// Cast nested params into the records of a has-many relationship, like Ecto's `cast_assoc`.
+    /// Cast nested params into the records of a has-many or many-to-many relationship, like
+    /// Ecto's `cast_assoc`.
     ///
     /// ```swift
     /// let changeset = Changeset<User>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
@@ -24,8 +26,9 @@ extension Changeset {
     ///
     /// `changeset` makes each record's changeset: of the loaded record whose primary key the
     /// params carry, or of a new record. Inserting or updating this changeset writes them, with
-    /// the foreign key set, in one transaction, and returns the record with the relationship
-    /// loaded. Their errors join this changeset's as `"posts[1].title"`.
+    /// the foreign key set or, for many-to-many, the join rows inserted, in one transaction, and
+    /// returns the record with the relationship loaded. Their errors join this changeset's as
+    /// `"posts[1].title"`.
     ///
     /// To update a record's relationship, preload it first. `onReplace` decides what happens to
     /// loaded records the params leave out.
@@ -36,62 +39,46 @@ extension Changeset {
         onReplace: OnReplace = .markAsInvalid,
         with changeset: (Related?, [String: any Sendable]) -> Changeset<Related>
     ) -> Changeset<T> {
-        let name = T._keyPathToColumn[keyPath] ?? "\(keyPath)"
-        guard T()[keyPath: keyPath].relationshipInfo.kind == .hasMany else {
-            return addError(name, message: "is not a has-many relationship")
-        }
-        var loaded: [Related] = []
-        if let data {
-            let relation = data[keyPath: keyPath]
-            guard relation.isLoaded else { return addError(name, message: "must be preloaded before casting") }
-            loaded = relation.value ?? []
-        }
         let relatedKey = SchemaRegistry.extractMetadata(from: Related.self).primaryKeyField
-        func key(of record: Related) -> AnyHashable? {
-            relatedKey.flatMap { PreloadQuery<Related>.extractPrimaryKeyPair(from: record, fieldName: $0)?.key }
-        }
-        var byKey: [AnyHashable: Related] = [:]
-        for record in loaded { if let key = key(of: record) { byKey[key] = record } }
-
-        var children: [(changeset: Changeset<Related>, existing: Related?)] = []
-        for params in params {
-            let existing = paramsKey(params, field: relatedKey, type: Related.self).flatMap { byKey.removeValue(forKey: $0) }
-            children.append((changeset(existing, params), existing))
-        }
-        let removed = loaded.filter { record in key(of: record).map { byKey[$0] != nil } ?? false }
-
-        var copy = self
-        for (index, child) in children.enumerated() {
-            for (field, messages) in child.changeset.errors {
-                copy.errors["\(name)[\(index)].\(field)", default: []].append(contentsOf: messages)
+        return associateMany(keyPath, foreignKey: foreignKey, onReplace: onReplace) { loaded in
+            var unmatched = loaded
+            return params.map { params in
+                changeset(paramsKey(params, field: relatedKey, type: Related.self).flatMap { unmatched.removeValue(forKey: $0) }, params)
             }
         }
-        if !removed.isEmpty && onReplace == .markAsInvalid {
-            copy.errors[name, default: []].append("is invalid")
-        }
+    }
 
-        let box = AssociationKeyPath(value: keyPath)
-        let foreignKey = Self.foreignKeyProperty(foreignKey, of: Related.self)
-        let writes = children
-        copy.associationWrites.append { parent, repo in
-            let parentKey = try Self.primaryKey(of: parent)
-            // Deleting first frees unique values for the records written after.
-            for record in removed {
-                try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: record))
-            }
-            var records: [Related] = []
-            for child in writes {
-                if child.existing != nil {
-                    records.append(try await repo.update(child.changeset))
-                } else {
-                    records.append(try await repo.insert(child.changeset.putChange(foreignKey, value: parentKey)))
-                }
-            }
-            var result = parent
-            result[keyPath: box.value] = SpectroLazyRelation(loaded: records, relationshipInfo: parent[keyPath: box.value].relationshipInfo)
-            return result
-        }
-        return copy
+    /// Make `records`, already stored, the records of a has-many or many-to-many relationship,
+    /// like Ecto's `put_assoc`.
+    ///
+    /// ```swift
+    /// let tags = try await repo.query(Tag.self).where { $0.name.in(["swift", "sql"]) }.all()
+    /// let post = try await repo.update(Changeset.cast(post, params: [:], permitted: []).putAssoc(\.$tags, tags))
+    /// ```
+    ///
+    /// Writing the changeset inserts the join rows of a many-to-many relationship that are
+    /// missing, or sets the foreign key of has-many records that belong elsewhere. `onReplace`
+    /// decides what happens to loaded records that `records` leave out. To insert or change
+    /// related records too, pass their changesets instead.
+    public func putAssoc<Related: Schema>(
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<[Related]>>,
+        _ records: [Related],
+        foreignKey: String? = nil,
+        onReplace: OnReplace = .markAsInvalid
+    ) -> Changeset<T> {
+        putAssoc(keyPath, records.map { Changeset<Related>(data: $0, action: .update) }, foreignKey: foreignKey, onReplace: onReplace)
+    }
+
+    /// `putAssoc(_:_:foreignKey:onReplace:)` with changesets: one without data inserts a record,
+    /// one with data updates it. Their errors join this changeset's as `"tags[1].name"`.
+    @_disfavoredOverload
+    public func putAssoc<Related: Schema>(
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<[Related]>>,
+        _ changesets: [Changeset<Related>],
+        foreignKey: String? = nil,
+        onReplace: OnReplace = .markAsInvalid
+    ) -> Changeset<T> {
+        associateMany(keyPath, foreignKey: foreignKey, onReplace: onReplace) { _ in changesets }
     }
 
     /// Cast nested params into the record of a has-one relationship, like Ecto's `cast_assoc`.
@@ -107,29 +94,128 @@ extension Changeset {
         onReplace: OnReplace = .markAsInvalid,
         with changeset: (Related?, [String: any Sendable]) -> Changeset<Related>
     ) -> Changeset<T> {
+        let relatedKey = SchemaRegistry.extractMetadata(from: Related.self).primaryKeyField
+        return associateOne(keyPath, foreignKey: foreignKey, onReplace: onReplace) { loaded in
+            guard let params else { return nil }
+            // Params carrying another record's key replace the loaded record, as in Ecto.
+            let givenKey = paramsKey(params, field: relatedKey, type: Related.self)
+            let matches = givenKey == nil || givenKey == loaded.flatMap(recordKey)?.key
+            return changeset(matches ? loaded : nil, params)
+        }
+    }
+
+    /// Make `record`, already stored, the record of a has-one relationship, like Ecto's
+    /// `put_assoc`. Writing the changeset sets its foreign key; `nil` leaves out the loaded
+    /// record, which `onReplace` then marks invalid or deletes, as does another record.
+    public func putAssoc<Related: Schema>(
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<Related?>>,
+        _ record: Related?,
+        foreignKey: String? = nil,
+        onReplace: OnReplace = .markAsInvalid
+    ) -> Changeset<T> {
+        putAssoc(keyPath, record.map { Changeset<Related>(data: $0, action: .update) }, foreignKey: foreignKey, onReplace: onReplace)
+    }
+
+    /// `putAssoc(_:_:foreignKey:onReplace:)` with a changeset: one without data inserts the
+    /// record, one with data updates it. Its errors join this changeset's as `"profile.bio"`.
+    @_disfavoredOverload
+    public func putAssoc<Related: Schema>(
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<Related?>>,
+        _ changeset: Changeset<Related>?,
+        foreignKey: String? = nil,
+        onReplace: OnReplace = .markAsInvalid
+    ) -> Changeset<T> {
+        associateOne(keyPath, foreignKey: foreignKey, onReplace: onReplace) { _ in changeset }
+    }
+
+    /// Change a has-many or many-to-many relationship to the records of `children`, made from
+    /// the loaded records by primary key. A child with data keeps the loaded record of its key.
+    private func associateMany<Related: Schema>(
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<[Related]>>,
+        foreignKey: String?,
+        onReplace: OnReplace,
+        children makeChildren: ([AnyHashable: Related]) -> [Changeset<Related>]
+    ) -> Changeset<T> {
+        let name = T._keyPathToColumn[keyPath] ?? "\(keyPath)"
+        let info = T()[keyPath: keyPath].relationshipInfo
+        guard info.kind == .hasMany || info.kind == .manyToMany else {
+            return addError(name, message: "is not a has-many or many-to-many relationship")
+        }
+        let junction = info.kind == .manyToMany ? PreloadQuery<T>.junction(info, to: Related.self) : nil
+        guard junction?.table.isEmpty != true else { return addError(name, message: "has no junction table") }
+        var loaded: [Related] = []
+        if let data {
+            let relation = data[keyPath: keyPath]
+            guard relation.isLoaded else { return addError(name, message: "must be preloaded before casting") }
+            loaded = relation.value ?? []
+        }
+        var byKey: [AnyHashable: Related] = [:]
+        for record in loaded { if let key = recordKey(record)?.key { byKey[key] = record } }
+        let children = makeChildren(byKey)
+        let kept = Set(children.compactMap { $0.data.flatMap(recordKey)?.key })
+        let removed = loaded.filter { record in recordKey(record).map { !kept.contains($0.key) } ?? false }
+
+        var copy = self
+        for (index, child) in children.enumerated() {
+            for (field, messages) in child.errors {
+                copy.errors["\(name)[\(index)].\(field)", default: []].append(contentsOf: messages)
+            }
+        }
+        if !removed.isEmpty && onReplace == .markAsInvalid {
+            copy.errors[name, default: []].append("is invalid")
+        }
+
+        let box = AssociationKeyPath(value: keyPath)
+        let foreignKey = Self.foreignKeyProperty(foreignKey, of: Related.self)
+        let isLoaded = children.map { child in child.data.flatMap(recordKey).map { byKey[$0.key] != nil } ?? false }
+        copy.associationWrites.append { parent, repo in
+            let parentKey = try Self.primaryKey(of: parent)
+            // Deleting first frees unique values for the records written after.
+            for record in removed {
+                if let junction {
+                    try await junction.unlink(parentKey, try Changeset<Related>.primaryKey(of: record), using: repo)
+                } else {
+                    try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: record))
+                }
+            }
+            var records: [Related] = []
+            for (child, isLoaded) in zip(children, isLoaded) {
+                let child = junction == nil && !isLoaded ? child.putChange(foreignKey, value: parentKey) : child
+                let record = child.data == nil ? try await repo.insert(child) : try await repo.update(child)
+                if let junction, !isLoaded {
+                    try await junction.link(parentKey, try Changeset<Related>.primaryKey(of: record), using: repo)
+                }
+                records.append(record)
+            }
+            var result = parent
+            result[keyPath: box.value] = SpectroLazyRelation(loaded: records, relationshipInfo: parent[keyPath: box.value].relationshipInfo)
+            return result
+        }
+        return copy
+    }
+
+    /// Change a has-one relationship to the record of `child`, made from the loaded record.
+    /// A child with the loaded record's key keeps it.
+    private func associateOne<Related: Schema>(
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<Related?>>,
+        foreignKey: String?,
+        onReplace: OnReplace,
+        child makeChild: (Related?) -> Changeset<Related>?
+    ) -> Changeset<T> {
         let name = T._keyPathToColumn[keyPath] ?? "\(keyPath)"
         guard T()[keyPath: keyPath].relationshipInfo.kind == .hasOne else {
             return addError(name, message: "is not a has-one relationship")
         }
-        var existing: Related?
+        var loaded: Related?
         if let data {
             let relation = data[keyPath: keyPath]
             guard relation.isLoaded else { return addError(name, message: "must be preloaded before casting") }
-            existing = relation.value ?? nil
+            loaded = relation.value ?? nil
         }
-        // Params carrying another record's key replace the loaded record, as in Ecto.
-        var removed: Related?
-        if let loaded = existing {
-            let relatedKey = SchemaRegistry.extractMetadata(from: Related.self).primaryKeyField
-            let loadedKey = relatedKey.flatMap { PreloadQuery<Related>.extractPrimaryKeyPair(from: loaded, fieldName: $0)?.key }
-            let givenKey = params.flatMap { paramsKey($0, field: relatedKey, type: Related.self) }
-            if params == nil || (givenKey != nil && givenKey != loadedKey) {
-                removed = loaded
-                existing = nil
-            }
-        }
-        let child = params.map { changeset(existing, $0) }
-        let current = existing
+        let child = makeChild(loaded)
+        let loadedKey = loaded.flatMap(recordKey)?.key
+        let isLoaded = loadedKey != nil && child?.data.flatMap(recordKey)?.key == loadedKey
+        let removed = loadedKey != nil && !isLoaded ? loaded : nil
 
         var copy = self
         for (field, messages) in child?.errors ?? [:] {
@@ -141,16 +227,14 @@ extension Changeset {
 
         let box = AssociationKeyPath(value: keyPath)
         let foreignKey = Self.foreignKeyProperty(foreignKey, of: Related.self)
-        let replaced = removed
         copy.associationWrites.append { parent, repo in
-            if let replaced {
-                try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: replaced))
+            if let removed {
+                try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: removed))
             }
             var record: Related?
-            if let child {
-                record = current != nil
-                    ? try await repo.update(child)
-                    : try await repo.insert(child.putChange(foreignKey, value: try Self.primaryKey(of: parent)))
+            if var child {
+                if !isLoaded { child = child.putChange(foreignKey, value: try Self.primaryKey(of: parent)) }
+                record = child.data == nil ? try await repo.insert(child) : try await repo.update(child)
             }
             var result = parent
             result[keyPath: box.value] = SpectroLazyRelation(loaded: record, relationshipInfo: parent[keyPath: box.value].relationshipInfo)
@@ -217,4 +301,32 @@ extension Changeset {
 /// A key path closures can capture; see `PreloadQuery`'s `KPBox`.
 private struct AssociationKeyPath<Root, Value>: @unchecked Sendable {
     let value: WritableKeyPath<Root, Value>
+}
+
+/// The primary key of a record, hashable and bound.
+private func recordKey<S: Schema>(_ record: S) -> (key: AnyHashable, data: PostgresData)? {
+    SchemaRegistry.extractMetadata(from: S.self).primaryKeyField.flatMap {
+        PreloadQuery<S>.extractPrimaryKeyPair(from: record, fieldName: $0)
+    }
+}
+
+/// The join table of a many-to-many relationship, and its columns referring to each side.
+struct Junction: Sendable {
+    let table: String
+    let parentColumn: String
+    let relatedColumn: String
+
+    func link(_ parent: any PrimaryKeyType, _ related: any PrimaryKeyType, using repo: any Repo) async throws {
+        _ = try await repo.executeRawQuery(
+            sql: "INSERT INTO \(table.quoted) (\(parentColumn.quoted), \(relatedColumn.quoted)) VALUES ($1, $2)",
+            parameters: [try parent.toPostgresData(), try related.toPostgresData()]
+        )
+    }
+
+    func unlink(_ parent: any PrimaryKeyType, _ related: any PrimaryKeyType, using repo: any Repo) async throws {
+        _ = try await repo.executeRawQuery(
+            sql: "DELETE FROM \(table.quoted) WHERE \(parentColumn.quoted) = $1 AND \(relatedColumn.quoted) = $2",
+            parameters: [try parent.toPostgresData(), try related.toPostgresData()]
+        )
+    }
 }

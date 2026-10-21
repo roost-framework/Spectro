@@ -239,6 +239,15 @@ struct QueryCompositionTests {
                 .all()
             #expect(ranked.map(\._1) == [2, 1, 1, 2])
 
+            let wide = try await lib.posts
+                .where { $0.title == "Cherry" }
+                .select { ($0.title, $0.views, $0.likes, $0.compAuthorId, $0.editorId, $0.expression("\($0.views) + \($0.likes)", as: Int.self)) }
+                .all()
+            let row = try #require(wide.first)
+            #expect(wide.count == 1)
+            #expect(row.0 == "Cherry" && row.1 == 150 && row.2 == 150 && row.5 == 300)
+            #expect(row.3 == lib.bo.id && row.4 == lib.ana.id)
+
             let none = try await lib.posts.where { $0.views > 1000 }.select { $0.expression("max(\($0.views))", as: Int?.self) }.all()
             #expect(none == [nil])
             let boosted = try await lib.posts.where { $0.likes > 100 }.select { $0.expression("\($0.views) + \(5)", as: Int.self) }.all()
@@ -247,6 +256,43 @@ struct QueryCompositionTests {
             let prolific = lib.posts.groupBy { $0.compAuthorId }.having { _ in .fragment("count(*) > \(1)") }.select { $0.compAuthorId }
             let names = try await lib.repo.query(CompAuthor.self).where { $0.id.in(prolific) }.orderBy { $0.name }.all().map(\.name)
             #expect(names == ["Ana", "Bo"])
+        }
+    }
+
+    @Test("Lateral joins select rows for each row, and window filters keep ranked rows")
+    func lateralAndQualify() async throws {
+        try await withLibrary { lib in
+            let authors = lib.repo.query(CompAuthor.self)
+            let most = try await authors
+                .joinLateral { author in lib.posts.where { $0.compAuthorId == author.id }.orderBy({ $0.views }, .desc).limit(1) }
+                .orderBy { $0.name }
+                .executeJoin(with: CompPost.self)
+                .all()
+            #expect(most.map { "\($0.0.name):\($0.1?.title ?? "")" } == ["Ana:Banana", "Bo:Cherry"])
+
+            let best = try await authors
+                .where { $0.name != "Bo" }
+                .leftJoinLateral(as: "best") { author in lib.posts.where { $0.compAuthorId == author.id && $0.views > 100 }.limit(1) }
+                .orderBy { $0.name }
+                .executeJoin(with: CompPost.self, as: "best")
+                .all()
+            #expect(best.map(\.0.name) == ["Ana", "Cy"])
+            #expect(best.map { $0.1?.title } == ["Banana", nil])
+
+            let busy = authors
+                .joinLateral { author in lib.posts.where { $0.compAuthorId == author.id } }
+                .where { $0.table(CompPost.self).views == 300 }
+            #expect(try await busy.count() == 1)
+            let missing = authors.joinLateral { _ in lib.posts.where { $0.table(CompAuthor.self, as: "nobody").name == "Ana" } }
+            await #expect(throws: SpectroError.self) { try await missing.all() }
+
+            let top = lib.posts
+                .where { $0.views > 20 }
+                .qualify { "row_number() OVER (PARTITION BY \($0.compAuthorId) ORDER BY \($0.views) DESC) <= \(1)" }
+                .orderBy { $0.title }
+            #expect(try await top.all().map(\.title) == ["Banana", "Cherry"])
+            #expect(try await top.count() == 2)
+            #expect(try await top.limit(1).all().map(\.title) == ["Banana"])
         }
     }
 

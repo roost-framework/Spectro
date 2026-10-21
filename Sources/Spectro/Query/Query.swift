@@ -290,6 +290,34 @@ public struct Query<T: Schema>: Sendable {
         return TupleQuery(baseQuery: self, items: [s1.selectionItem, s2.selectionItem, s3.selectionItem, s4.selectionItem])
     }
 
+    /// Return any number of columns or expressions as a Swift tuple, such as five or more.
+    ///
+    /// ```swift
+    /// let rows = try await repo.query(User.self)
+    ///     .select { ($0.id, $0.name, $0.email, $0.age, $0.isActive) }
+    ///     .all()   // [(UUID, String, String, Int, Bool)]
+    /// ```
+    public func select<each S: Selection>(
+        _ selector: (QueryBuilder<T>) -> (repeat each S)
+    ) -> TupleQuery<T, (repeat (each S).Value)> {
+        let selections = selector(QueryBuilder<T>())
+        var items: [SelectionItem] = []
+        for selection in repeat each selections { items.append(selection.selectionItem) }
+        return TupleQuery(baseQuery: self, items: items) { row, fields in
+            let columns = row.makeRandomAccess()
+            var index = 0
+            func next<V>(_: V.Type) throws -> V {
+                defer { index += 1 }
+                do {
+                    return try extractValue(from: columns[data: fields[index]])
+                } catch {
+                    throw SpectroError.resultDecodingFailed(column: fields[index], expectedType: String(describing: V.self))
+                }
+            }
+            return (repeat try next((each S).Value.self))
+        }
+    }
+
     public func selectFields<V>(_ field: (QueryBuilder<T>) -> QueryField<V>) -> Query<T> {
         var copy = self
         let queryField = field(QueryBuilder<T>())
@@ -635,6 +663,9 @@ public struct Query<T: Schema>: Sendable {
         return joins.map { join in
             let table = join.table.quoted
             let identifier = join.identifier.quoted
+            if let source = join.source {
+                return "\(join.type.sql) LATERAL (\(source.sql)) AS \(identifier) ON \(join.condition)"
+            }
             // Joining the filtered rows under the table's own name hides soft-deleted rows
             // for every join type; a filter in ON is wrong for a right join, in WHERE for a left.
             guard let sdf = join.softDeleteColumn, !includeSoftDeleted else {
@@ -661,6 +692,7 @@ public struct Query<T: Schema>: Sendable {
             }
         }
         for join in joins {
+            if let error = join.source?.error { throw error }
             if let alias = join.alias {
                 let bytes = Array(alias.utf8)
                 let valid = !bytes.isEmpty && bytes.count <= 63 &&
@@ -731,15 +763,18 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
     private let items: [SelectionItem]
     /// The result column of each item: a table column's name, or an expression's alias.
     private let selectedFields: [String]
+    /// Decodes a row from the result columns, unless `Result` is a single value or `TupleBuildable`.
+    private let decode: (@Sendable (PostgresRow, [String]) throws -> Result)?
 
-    internal init(baseQuery: Query<T>, items: [SelectionItem]) {
+    internal init(baseQuery: Query<T>, items: [SelectionItem], decode: (@Sendable (PostgresRow, [String]) throws -> Result)? = nil) {
         self.baseQuery = baseQuery
         self.items = items
+        self.decode = decode
         self.selectedFields = items.enumerated().map { index, item in item.column ?? "spectro_select_\(index)" }
     }
 
     private func with(_ query: Query<T>) -> TupleQuery<T, Result> {
-        TupleQuery(baseQuery: query, items: items)
+        TupleQuery(baseQuery: query, items: items, decode: decode)
     }
 
     public func `where`(_ condition: (QueryBuilder<T>) -> QueryCondition) -> TupleQuery<T, Result> {
@@ -830,6 +865,7 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
     }
 
     private func mapRowToTuple(_ row: PostgresRow) throws -> Result {
+        if let decode { return try decode(row, selectedFields) }
         if let tupleBuildableType = Result.self as? any TupleBuildable.Type {
             let mapped = try TupleMapper.mapRow(row, selectedFields: selectedFields, to: tupleBuildableType)
             guard let result = mapped as? Result else {
@@ -1222,10 +1258,12 @@ internal struct JoinClause: Sendable {
     let condition: String
     let parameters: [PostgresData]
     let referencedTables: Set<JoinTableReference>
+    /// The rows of a lateral join, which `parameters` binds before the condition's.
+    var source: QuerySource?
 
     var identifier: String { alias ?? table }
 
-    init(type: JoinType, table: String, alias: String? = nil, softDeleteColumn: String?, condition: String, parameters: [PostgresData], referencedTables: Set<JoinTableReference> = []) {
+    init(type: JoinType, table: String, alias: String? = nil, softDeleteColumn: String?, condition: String, parameters: [PostgresData], referencedTables: Set<JoinTableReference> = [], source: QuerySource? = nil) {
         self.type = type
         self.table = table
         self.alias = alias
@@ -1233,6 +1271,7 @@ internal struct JoinClause: Sendable {
         self.condition = condition
         self.parameters = parameters
         self.referencedTables = referencedTables
+        self.source = source
     }
 }
 
