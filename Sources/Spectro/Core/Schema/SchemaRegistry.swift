@@ -128,8 +128,9 @@ public actor SchemaRegistry {
             return FieldInfo(name: fieldName, databaseName: defaultDBName, valueType: Date.self, isNullable: true, isSoftDelete: true)
 
         case let col as any ForeignKeyWrapperProtocol:
+            let wrapped = (col.foreignKeyValueType as? any OptionalDatabaseValue.Type)?.wrappedValueType
             return FieldInfo(name: fieldName, databaseName: col.foreignKeyColumnName ?? defaultDBName,
-                             valueType: col.foreignKeyValueType, isForeignKey: true)
+                             valueType: wrapped ?? col.foreignKeyValueType, isForeignKey: true, isNullable: wrapped != nil)
 
         default:
             return nil

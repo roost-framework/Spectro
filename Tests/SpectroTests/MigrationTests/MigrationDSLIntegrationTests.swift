@@ -131,6 +131,125 @@ extension DatabaseIntegrationTests {
             }
             await db.shutdown()
         }
+
+        struct Shape: Migration {
+            static let id = "1900000010_dsl_shape"
+            let suffix: String
+            var change: MigrationPlan {
+                CreateEnum("mood_\(suffix)", values: ["happy", "sad"])
+                CreateTable("owners_\(suffix)") { $0.column("id", .integer).primaryKey() }
+                CreateTable("entries_\(suffix)") { table in
+                    table.column("id", .integer).primaryKey()
+                    table.column("title", .text)
+                    table.column("views", .integer).notNull().default(0)
+                    table.column("legacy", .text)
+                    table.column("owner_id", .integer)
+                    table.column("mood", .named("mood_\(suffix)"))
+                    table.column("tags", .array(.text))
+                }
+            }
+        }
+
+        struct Reshape: Migration {
+            static let id = "1900000011_dsl_reshape"
+            let suffix: String
+            var change: MigrationPlan {
+                AlterTable("entries_\(suffix)") { table in
+                    table.remove("legacy", .text)
+                    table.alter("views", type: .bigint, from: .integer)
+                    table.setNotNull("title")
+                    table.setDefault("mood", .sql("'happy'"), from: nil)
+                    table.check("entries_\(suffix)_views", sql: "views >= 0")
+                    table.unique("entries_\(suffix)_title", columns: ["title"])
+                    table.foreignKey("owner_id", references: "owners_\(suffix)")
+                }
+                RenameTable("entries_\(suffix)", to: "posts_\(suffix)")
+            }
+        }
+
+        struct ConcurrentIndex: Migration {
+            static let id = "1900000012_dsl_concurrent_index"
+            static let runsInTransaction = false
+            let suffix: String
+            var change: MigrationPlan {
+                CreateIndex("posts_\(suffix)_views", on: "posts_\(suffix)", columns: ["views"]).concurrently()
+            }
+        }
+
+        @Test("Alterations, enum types, renames, and concurrent indexes apply and roll back")
+        func reshape() async throws {
+            let db = try connection()
+            let suffix = UUID().uuidString.prefix(8).lowercased()
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spectro_sql_\(suffix)")
+            let ids = [Shape.id, Reshape.id, ConcurrentIndex.id, "1900000013_sql_concurrent"]
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try """
+                    -- migrate:up transaction:false
+                    CREATE INDEX CONCURRENTLY "posts_\(suffix)_title" ON "posts_\(suffix)" ("title");
+                    -- migrate:down
+                    DROP INDEX CONCURRENTLY "posts_\(suffix)_title";
+                    """.write(to: directory.appendingPathComponent("\(ids[3]).sql"), atomically: true, encoding: .utf8)
+
+                let runner = MigrationRunner(connection: db, sources: [
+                    .prepared([
+                        try MigrationCompiler.prepare(Shape(suffix: suffix)),
+                        try MigrationCompiler.prepare(Reshape(suffix: suffix)),
+                        try MigrationCompiler.prepare(ConcurrentIndex(suffix: suffix)),
+                    ]),
+                    .sqlDirectory(directory),
+                ])
+                try await runner.runMigrations()
+
+                try await db.executeUpdate(sql: #"INSERT INTO "owners_\#(suffix)" VALUES (1)"#)
+                try await db.executeUpdate(sql: #"INSERT INTO "posts_\#(suffix)" (id, title, views, owner_id, tags) VALUES (1, 'a', 50, 1, ARRAY['x'])"#)
+                let mood = try await db.executeQuery(sql: #"SELECT mood::text AS mood FROM "posts_\#(suffix)""#) {
+                    $0.makeRandomAccess()[data: "mood"].string
+                }
+                #expect(mood == ["happy"])
+                for sql in [
+                    #"INSERT INTO "posts_\#(suffix)" (id, title, views) VALUES (2, 'a', 1)"#,
+                    #"INSERT INTO "posts_\#(suffix)" (id, views) VALUES (3, 1)"#,
+                    #"INSERT INTO "posts_\#(suffix)" (id, title, views) VALUES (4, 'b', -1)"#,
+                    #"INSERT INTO "posts_\#(suffix)" (id, title, owner_id) VALUES (5, 'c', 9)"#,
+                    #"INSERT INTO "posts_\#(suffix)" (id, title, mood) VALUES (6, 'd', 'angry')"#,
+                ] {
+                    await #expect(throws: SpectroError.self) { try await db.executeUpdate(sql: sql) }
+                }
+                let indexes = try await db.executeQuery(sql: "SELECT indexname FROM pg_indexes WHERE tablename = 'posts_\(suffix)' ORDER BY indexname") {
+                    $0.makeRandomAccess()[data: "indexname"].string
+                }
+                #expect(indexes.contains("posts_\(suffix)_views"))
+                #expect(indexes.contains("posts_\(suffix)_title"))
+
+                try await runner.runRollback(steps: 3)
+                let columns = try await db.executeQuery(sql: """
+                    SELECT column_name, data_type, is_nullable FROM information_schema.columns
+                    WHERE table_name = 'entries_\(suffix)' ORDER BY column_name
+                    """) { row -> String in
+                    let row = row.makeRandomAccess()
+                    return "\(row[data: "column_name"].string ?? "") \(row[data: "data_type"].string ?? "") \(row[data: "is_nullable"].string ?? "")"
+                }
+                #expect(columns.contains("legacy text YES"))
+                #expect(columns.contains("views integer NO"))
+                #expect(columns.contains("title text YES"))
+
+                try await runner.runRollback(steps: 1)
+                let leftovers = try await db.executeQuery(sql: "SELECT to_regclass('entries_\(suffix)') IS NULL AND to_regtype('mood_\(suffix)') IS NULL AS gone") {
+                    $0.makeRandomAccess()[data: "gone"].bool
+                }
+                #expect(leftovers == [true])
+            } catch {
+                try? await db.executeUpdate(sql: #"DROP TABLE IF EXISTS "posts_\#(suffix)", "entries_\#(suffix)", "owners_\#(suffix)" CASCADE"#)
+                try? await db.executeUpdate(sql: #"DROP TYPE IF EXISTS "mood_\#(suffix)""#)
+                try? FileManager.default.removeItem(at: directory)
+                try? await db.executeUpdate(sql: "DELETE FROM schema_migrations WHERE version IN ('\(ids.joined(separator: "','"))')")
+                await db.shutdown()
+                throw error
+            }
+            try? FileManager.default.removeItem(at: directory)
+            await db.shutdown()
+        }
     }
 }
 

@@ -27,6 +27,7 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 - ``Repo``
 - ``GenericDatabaseRepo``
 - ``ConflictTarget``
+- ``ConflictAction``
 
 ### Define a schema
 
@@ -45,6 +46,7 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 ### Validate changes
 
 - ``Changeset``
+- ``OnReplace``
 - ``ChangesetErrors``
 
 ### Build queries
@@ -54,6 +56,11 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 - ``QueryField``
 - ``QueryCondition``
 - ``SQLFragment``
+- ``QueryBatches``
+- ``TupleQuery``
+- ``Selection``
+- ``SelectionItem``
+- ``SQLExpression``
 - ``FieldAssignment``
 - ``RowLockStrength``
 - ``RowLockWait``
@@ -69,6 +76,7 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 ### Load relationships
 
 - ``ForeignKey``
+- ``ForeignKeyValue``
 - ``HasMany``
 - ``HasOne``
 - ``BelongsTo``
@@ -79,6 +87,7 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 ### Execute transactions
 
 - ``TransactionRepo``
+- ``TransactionIsolation``
 - ``TransactionContext``
 - ``QueryExecutor``
 - ``QueryEvent``

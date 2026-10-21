@@ -42,4 +42,4 @@ Check for another migration process and ensure the connection is direct or sessi
 
 ### Plan succeeds but PostgreSQL rejects the change
 
-Planning validates declarations and SQL statement boundaries without consulting the database. PostgreSQL checks SQL syntax, referenced objects, permissions, existing rows, and constraints at execution. Raw SQL must be compatible with the migration's transaction; for example, `CREATE INDEX CONCURRENTLY` cannot run there.
+Planning validates declarations and SQL statement boundaries without consulting the database. PostgreSQL checks SQL syntax, referenced objects, permissions, existing rows, and constraints at execution. Raw SQL must be compatible with the migration's transaction; for example, `CREATE INDEX CONCURRENTLY` runs only in a migration whose ``Migration/runsInTransaction`` is `false`.

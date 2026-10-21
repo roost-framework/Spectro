@@ -36,15 +36,17 @@ Browse guides and searchable API reference in the [documentation for the latest 
 - **`@Schema` macro** -- generates `SchemaBuilder` and `Encodable` conformance at compile time (zero boilerplate)
 - **Generic primary keys** -- `@ID<UUID>`, `@ID<Int>`, `@ID<String>` via the `PrimaryKeyType` protocol
 - **Immutable query builder** -- `Query<T>` is a value type; every `.where()`, `.join()`, `.orderBy()` returns a new query
-- **Type-safe aggregates** -- `.sum()`, `.avg()`, `.min()`, `.max()`, `.count()` with `GROUP BY` and `HAVING` support
+- **Type-safe aggregates** -- `.sum()`, `.avg()`, `.min()`, `.max()`, `.count()` with `GROUP BY` and `HAVING` support, and typed grouped projections with SQL expressions and window functions
 - **PostgreSQL column types** -- `Decimal`, arrays, `jsonb`, `bytea`, raw-value enums, and your own types through `DatabaseValue`
-- **SQL fragments** -- raw SQL in filters with qualified fields and bound values, like Ecto's `fragment`
-- **Upsert and bulk insert** -- `ON CONFLICT` upserts and multi-row inserts with automatic batching
+- **SQL fragments** -- raw SQL in filters, ordering, and whole statements, with qualified fields and bound values, like Ecto's `fragment`
+- **Query composition** -- `DISTINCT` and `DISTINCT ON`, `IN` and `EXISTS` subqueries, unions, intersections, differences, recursive queries, and column comparisons
+- **Upsert and bulk insert** -- `ON CONFLICT` upserts, multi-row inserts that skip or update conflicting records, with automatic batching
+- **Reloads and batches** -- reload records in one query, and read large results in primary key batches
 - **Bulk updates, deletes, and row locks** -- `updateAll`, `deleteAll`, and `FOR UPDATE … SKIP LOCKED`
 - **Relationship preloading** -- batch-loads `HasMany`, `HasOne`, `BelongsTo`, and `ManyToMany` relationships to prevent N+1 queries, nested and customized, on queries or loaded records
 - **Query logging and observation** -- a debug log line and a `QueryEvent` per statement
 - **Test sandbox** -- run tests in a transaction that is always rolled back, like Ecto's SQL sandbox
-- **Transaction support** -- `READ COMMITTED` isolation with automatic rollback; full CRUD and query builder available inside transactions via `QueryExecutor`
+- **Transaction support** -- `READ COMMITTED`, `REPEATABLE READ`, or `SERIALIZABLE` isolation with automatic rollback; full CRUD and query builder available inside transactions via `QueryExecutor`
 - **Changesets** -- permitted-field casting, validation, serializable errors, and insert/update inside transactions
 - **Pagination and soft deletes** -- counted pages and opt-in deleted-record filtering
 - **Actor-based connection pooling** -- built on SwiftNIO and PostgresKit
@@ -193,7 +195,7 @@ struct User {
 | `@Column<T>` | Regular column, optional name override | `@Column("display_name") var name: String` |
 | `@Timestamp` | Date column | `@Timestamp var createdAt: Date` |
 | `@SoftDelete` | Nullable deletion timestamp | `@SoftDelete var deletedAt: Date?` |
-| `@ForeignKey<T>` | Foreign key reference, optional name override | `@ForeignKey var userId: UUID` |
+| `@ForeignKey<T>` | Foreign key reference, optional name override; `Optional` for a nullable key | `@ForeignKey var userId: UUID`, `@ForeignKey var editorId: UUID?` |
 | `@HasMany<T>` | One-to-many relationship, optional FK binding | `@HasMany(foreignKey: "authorId") var posts: [Post]` |
 | `@HasOne<T>` | One-to-one relationship | `@HasOne var profile: Profile?` |
 | `@BelongsTo<T>` | Inverse of HasMany/HasOne | `@BelongsTo var user: User?` |
@@ -391,6 +393,27 @@ let users = [
 let inserted = try await repo.insertAll(users)
 ```
 
+Skip or update the records that conflict with existing rows, like Ecto's `on_conflict`. The records returned are those inserted or updated:
+
+```swift
+let added = try await repo.insertAll(tags, onConflict: .nothing())     // ON CONFLICT DO NOTHING
+let synced = try await repo.insertAll(products, onConflict: .replace(on: .columns(["sku"]), columns: ["price"]))
+let user = try await repo.insert(newUser, onConflict: .nothing(on: .columns(["email"])))   // nil when skipped
+```
+
+### Reloads and batches
+
+```swift
+let fresh = try await repo.reload(user)        // nil once deleted
+let current = try await repo.reload(users)     // one query, same order
+
+for try await batch in repo.query(User.self).batches(of: 1000) {
+    try await export(batch)
+}
+```
+
+`batches(of:)` reads rows in primary key order, one query per batch, like Ecto's `Repo.stream`, so a large table never sits in memory at once. A row that a join repeats appears once. Iterate in a `repeatableRead` transaction to read one snapshot.
+
 ## Changesets
 
 Use `Changeset<YourSchema>.cast` for external parameters before inserting or updating:
@@ -406,6 +429,18 @@ let user = try await repo.insert(changeset)
 Only permitted schema fields are kept, using Swift property names even when a column has a custom database name. Casting checks the schema type: numeric strings, `"true"`/`"false"` and `"1"`/`"0"` booleans, UUID strings, and ISO 8601 date strings are converted. Invalid values add an `"is invalid"` error and are excluded from `changes`; for example, `"banana"` for an integer field makes `isValid` false before any SQL runs. Non-finite floating-point values are rejected. Explicit optional `nil` values are accepted only for nullable fields.
 
 Pass an existing record instead of `nil` for an update. Direct `Changeset` initialization and `putChange` accept trusted application values without casting.
+
+Name fields with key paths instead of strings, so a renamed property fails to compile and values have the field's type:
+
+```swift
+let changeset = Changeset<User>.cast(nil, params: params, permitting: \.name, \.email, \.role)
+    .validateRequired(\.name, \.email)
+    .validateLength(\.name, min: 2)
+    .validateInclusion(\.role, in: [.member, .admin])
+    .validateCustom(\.age) { $0 >= 18 ? nil : "must be an adult" }
+    .putChange(\.isActive, true)
+let email: String? = changeset.getField(\.email)
+```
 
 ### Database constraint errors
 
@@ -433,6 +468,46 @@ If PostgreSQL reports a partition's physical table instead of the parent table, 
 A mapped database failure still aborts its PostgreSQL transaction. Use `TransactionRepo.savepoint` around a write if you intend to catch that failure and continue the transaction.
 
 For a composite constraint, declare the same name on each field that should receive an error. Constraints deferred until transaction commit are reported through `serverError`, because the individual insert or update has already returned.
+
+### Optimistic locking
+
+`optimisticLock` guards an update against concurrent ones, like Ecto's `optimistic_lock`. The update increments an integer version column and matches the row only while it holds the version that was loaded; otherwise it throws `SpectroError.staleRecord`:
+
+```swift
+// @Column var lockVersion: Int = 1, stored in a "lock_version" integer column.
+// Permit "lockVersion" to check the version a form was loaded with, as Ecto does.
+let changeset = Changeset.cast(post, params: params, permitted: ["title", "lockVersion"]).optimisticLock()
+do {
+    let updated = try await repo.update(changeset)
+} catch SpectroError.staleRecord {
+    // Someone else updated or deleted the post since it was loaded: reload and retry.
+}
+```
+
+Pass another field name, such as `.optimisticLock("revision")`, to use another column.
+
+### Nested records and preparations
+
+`castAssoc` casts nested params into a has-many or has-one relationship, like Ecto's `cast_assoc`. Inserting or updating the changeset writes the related records, with their foreign key, in one transaction, and returns the record with the relationship loaded:
+
+```swift
+let changeset = Changeset<User>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
+    .castAssoc(\.$posts, params: [["title": "Hello"], ["title": "World"]]) { post, params in
+        Changeset.cast(post, params: params, permitted: ["title"]).validateRequired(["title"])
+    }
+let user = try await repo.insert(changeset)
+```
+
+Errors of the related changesets join the record's as `"posts[1].title"`. To update a relationship, preload it: params carrying a loaded record's primary key update it, others insert a record, and `onReplace` decides what happens to the loaded records left out, `.markAsInvalid` by default or `.delete`.
+
+`prepareChanges` runs a function in the same transaction just before the write, like Ecto's `prepare_changes`, for instance to update a counter. It is skipped for an invalid changeset:
+
+```swift
+.prepareChanges { changeset, tx in
+    let count = try await tx.query(Post.self).where { $0.userId == user.id }.count()
+    return changeset.putChange("postCount", value: count)
+}
+```
 
 ## Query Builder
 
@@ -514,9 +589,18 @@ For SQL the builder does not cover, write a fragment, like Ecto's `fragment`. In
 .where { .fragment("\($0.settings) ->> 'theme' = \(theme)") }
 .where { .fragment("\($0.settings) ? 'beta'") }       // a literal ? is the jsonb operator
 .having { _ in .fragment("count(*) > \(10)") }
+.orderBy(sql: { "\($0.score) * \(weight)" }, .desc)    // mixes with field sorts in call order
 ```
 
-Fragments combine with `&&`, `||`, and `!`, and nest: interpolate one `SQLFragment` in another. `\(identifier: name)` inserts a double-quoted identifier.
+Fragments combine with `&&`, `||`, and `!`, and nest: interpolate one `SQLFragment` in another. `\(identifier: name)` inserts a double-quoted identifier. `count()` and aggregates drop the ordering along with its parameters.
+
+Run a whole statement written as a fragment with `executeRawQuery(_:)`, like Ecto's `Repo.query`:
+
+```swift
+let rows = try await repo.executeRawQuery(
+    "SELECT \(identifier: "id") FROM \(identifier: "posts") WHERE \(identifier: "views") > \(100)"
+)
+```
 
 ### Bulk updates and deletes
 
@@ -621,6 +705,40 @@ let pairs = try await repo.query(User.self)
 
 Give every repeated table a distinct alias. When joining another occurrence, `builder.table(User.self, as: "manager")` refers to the earlier occurrence; `builder.right` refers to the one being added. `executeJoin(with:as:)` selects which occurrence to decode alongside the main model. `joinAndExecute` and `leftJoinAndExecute` also accept `as:`. Aliases use 1–63 ASCII letters, digits, or underscores and start with a letter or underscore. Default soft-delete filtering applies to each occurrence; `withDeleted()` includes deleted rows throughout the query.
 
+### Distinct, subqueries, and set operations
+
+```swift
+// Remove the duplicates a join adds, or keep each author's most viewed post.
+.join(Comment.self) { $0.left.id == $0.right.postId }.distinct()
+.distinct { $0.authorId }.orderBy({ $0.views }, .desc)       // DISTINCT ON
+
+// Compare columns, filter with subqueries, and test existence.
+.where { $0.likes > $0.views }
+.where { $0.id.in(repo.query(Post.self).where { $0.views > 100 }.select { $0.authorId }) }
+.where { post in .exists(repo.query(Comment.self).where { $0.postId == post.id }) }
+.where { post in !.exists(repo.query(Comment.self).where { $0.postId == post.id }) }
+let hasAdmins = try await repo.query(User.self).where { $0.isAdmin == true }.exists()
+
+// Combine queries; clauses added afterwards apply to the combined rows.
+let feed = try await mine.union(pinned).orderBy({ $0.createdAt }, .desc).limit(20).all()
+```
+
+`distinct { }` sorts by its columns first, as PostgreSQL's `DISTINCT ON` requires and as Ecto does, and counts and aggregates see each remaining row once. `union`, `unionAll`, `intersect`, `intersectAll`, `except`, and `exceptAll` keep each query's own filters, ordering, and limit. They compare whole rows, so a `json` column, which has no equality, needs `unionAll` (`jsonb` works), and they cannot lock rows. A correlated subquery refers to the outer query's fields, as `post.id` does above; a subquery of the same table cannot, because its own columns have the same names. As in SQL, `notIn` matches no row when the subquery selects a NULL.
+
+### Recursive queries
+
+`recursive` follows rows from the query's rows, like a `WITH RECURSIVE` CTE. In its closure, `$0.left` is a row of the table and `$0.right` a row already found:
+
+```swift
+let subtree = try await repo.query(Category.self)
+    .where { $0.id == rootID }
+    .recursive { $0.left.parentId == $0.right.id }   // ancestors: $0.left.id == $0.right.parentId
+    .orderBy { $0.name }
+    .all()
+```
+
+A row found again is not followed again, so cycles end. Soft-deleted rows are not reached unless the query uses `withDeleted()`.
+
 ### Query inspection
 
 ```swift
@@ -645,6 +763,8 @@ These methods also work on `TupleQuery` and typed `JoinQuery`. `statement()` des
 | `.first()` | `T?` | Execute query, return first row or nil |
 | `.firstOrFail()` | `T` | Execute query, throw `SpectroError.notFound` if empty |
 | `.count()` | `Int` | Return count of matching rows |
+| `.exists()` | `Bool` | Whether any row matches |
+| `.batches(of:)` | `QueryBatches<T>` | Iterate matching rows in primary key batches |
 
 ## Relationships
 
@@ -746,7 +866,7 @@ let users = try await repo.query(User.self)
 
 ## Transactions
 
-Transactions use `READ COMMITTED` isolation with automatic rollback on error. The closure receives a `Repo`-conforming object with full CRUD and query builder support:
+Transactions use `READ COMMITTED` isolation by default, with automatic rollback on error. The closure receives a `Repo`-conforming object with full CRUD and query builder support:
 
 ```swift
 let (user, profile) = try await spectro.transaction { repo in
@@ -777,6 +897,23 @@ try await spectro.transaction { repo in
     } catch let error as SpectroError where error.serverError?.sqlState == "23505" {
         // The coupon insert was rolled back; the transaction is still usable.
     }
+}
+```
+
+Ask for a stricter isolation level when a transaction must not see concurrent changes. PostgreSQL may then abort it with SQLSTATE `40001`; run it again:
+
+```swift
+let balance = try await spectro.transaction(isolation: .serializable) { tx in
+    // read, check, and write as if no other transaction ran meanwhile
+}
+```
+
+Spectro names tables without a schema, so PostgreSQL's `search_path` chooses the schema, which covers Ecto's query prefixes for tenant schemas. Set it with `SET LOCAL` inside a transaction, so it ends with the transaction instead of staying on a pooled connection:
+
+```swift
+let invoices = try await spectro.transaction { tx in
+    try await tx.executeRawSQL(#"SET LOCAL search_path TO "tenant_42""#)
+    return try await tx.query(Invoice.self).where { $0.paid == false }.all()
 }
 ```
 
@@ -925,7 +1062,22 @@ let quads: [Tuple4<UUID, String, String, Bool>] = try await repo.query(User.self
     .all()
 ```
 
-`TupleQuery` supports `.where()`, `.orderBy()`, `.limit()`, `.offset()`, `.first()`, `.firstOrFail()`, and `.count()`.
+Select SQL expressions too, such as aggregates of a grouped query or window functions. Each expression decodes as the type you give, an `Optional` when it can be NULL:
+
+```swift
+let totals: [Tuple2<UUID, Int>] = try await repo.query(Post.self)
+    .groupBy { $0.authorId }
+    .having { _ in .fragment("count(*) > \(1)") }
+    .select { ($0.authorId, $0.expression("sum(\($0.views))", as: Int.self)) }
+    .orderBy(sql: { "sum(\($0.views))" }, .desc)
+    .all()
+
+let ranked = try await repo.query(Post.self)
+    .select { ($0.title, $0.expression("rank() OVER (PARTITION BY \($0.authorId) ORDER BY \($0.views) DESC)", as: Int.self)) }
+    .all()
+```
+
+`TupleQuery` supports `.where()`, `.orderBy()`, `.limit()`, `.offset()`, `.distinct()`, `.first()`, `.firstOrFail()`, and `.count()`. A projection of a query with `groupBy` returns one result per group, and `count()` counts the groups.
 
 ## CLI Reference
 

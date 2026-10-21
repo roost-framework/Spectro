@@ -23,6 +23,15 @@ internal enum PostgresMigrationRenderer {
         case .boolean: return "BOOLEAN"
         case .timestamptz: return "TIMESTAMPTZ"
         case .jsonb: return "JSONB"
+        case .smallint: return "SMALLINT"
+        case .real: return "REAL"
+        case .doublePrecision: return "DOUBLE PRECISION"
+        case .date: return "DATE"
+        case .timestamp: return "TIMESTAMP"
+        case .bytea: return "BYTEA"
+        case .json: return "JSON"
+        case .array(let element): return try Self.type(element) + "[]"
+        case .named(let name, let schema): return try qualified(name, schema: schema)
         case .varchar(let length):
             guard (1...10_485_760).contains(length) else { throw MigrationPlanningError(reason: "Invalid varchar length") }
             return "VARCHAR(\(length))"

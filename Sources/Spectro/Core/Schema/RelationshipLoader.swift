@@ -54,6 +54,8 @@ public struct RelationshipLoader {
         using repo: GenericDatabaseRepo
     ) async throws -> Parent? {
         guard let fkData = extractPrimaryKeyPair(from: child, fieldName: foreignKey)?.data else {
+            // A nil foreign key refers to no parent.
+            if await SchemaRegistry.shared.register(Child.self).fields.contains(where: { $0.name == foreignKey }) { return nil }
             throw SpectroError.missingRequiredField("FK '\(foreignKey)' not found in \(Child.self)")
         }
         let parentMeta = await SchemaRegistry.shared.register(parentType)

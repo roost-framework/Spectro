@@ -74,7 +74,7 @@ An unpaired `SQL("...")` or ``DropTable`` requires an explicit branch. Empty bra
 
 ### Stay within one transaction
 
-Raw SQL runs in the same per-migration transaction as typed operations and the ledger update. Prepared migrations reject transaction-control statements such as `BEGIN`, `COMMIT`, and `ROLLBACK`. `CREATE INDEX CONCURRENTLY` cannot run in this transaction model; PostgreSQL rejects it and that migration rolls back.
+Raw SQL runs in the same per-migration transaction as typed operations and the ledger update. Prepared migrations reject transaction-control statements such as `BEGIN`, `COMMIT`, and `ROLLBACK`. `CREATE INDEX CONCURRENTLY` needs a migration whose ``Migration/runsInTransaction`` is `false`; otherwise PostgreSQL rejects it and that migration rolls back.
 
 The statement parser preserves dollar-quoted function bodies, escape strings, quoted identifiers, nested comments, and SQL line-comment boundaries. Planning checks the migration structure and statement boundaries. PostgreSQL still validates SQL syntax, permissions, and schema references at execution.
 

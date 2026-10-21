@@ -49,8 +49,73 @@ extension Repo {
         try await insertAll(instances, includePrimaryKey: false)
     }
 
+    /// Insert records in batches, skipping or updating those that conflict with existing rows,
+    /// like Ecto's `insert_all` with `on_conflict`. Returns the records inserted or updated.
+    ///
+    /// ```swift
+    /// let added = try await repo.insertAll(tags, onConflict: .nothing(on: .columns(["name"])))
+    /// let synced = try await repo.insertAll(products, onConflict: .replace(on: .columns(["sku"]), columns: ["price"]))
+    /// ```
+    ///
+    /// One batch must not update the same row twice: PostgreSQL rejects that.
+    public func insertAll<T: Schema>(_ instances: [T], onConflict: ConflictAction, includePrimaryKey: Bool = false) async throws -> [T] {
+        try await RepoOperations(executor: query(T.self).executor)
+            .insertAll(instances, includePrimaryKey: includePrimaryKey, onConflict: onConflict)
+    }
+
+    /// Insert a record, skipping or updating it when it conflicts with an existing row.
+    /// Returns `nil` when the record was skipped.
+    public func insert<T: Schema>(_ instance: T, onConflict: ConflictAction, includePrimaryKey: Bool = false) async throws -> T? {
+        try await insertAll([instance], onConflict: onConflict, includePrimaryKey: includePrimaryKey).first
+    }
+
+    /// The record as stored now, like Ecto's `Repo.reload`, or `nil` once it is deleted or soft-deleted.
+    public func reload<T: Schema>(_ record: T) async throws -> T? {
+        try await reload([record])[0]
+    }
+
+    /// The records as stored now, in one query and in the same order, with `nil` for those
+    /// deleted or soft-deleted since.
+    public func reload<T: Schema>(_ records: [T]) async throws -> [T?] {
+        guard !records.isEmpty else { return [] }
+        let metadata = await SchemaRegistry.shared.register(T.self)
+        guard let primaryKey = metadata.fields.first(where: \.isPrimaryKey) else {
+            throw SpectroError.invalidSchema(reason: "Schema \(T.self) has no primary key field")
+        }
+        let keys = try records.map { record in
+            guard let key = PreloadQuery<T>.extractPrimaryKeyPair(from: record, fieldName: primaryKey.name) else {
+                throw SpectroError.invalidSchema(reason: "Could not extract primary key value from \(T.self)")
+            }
+            return key
+        }
+        let placeholders = Array(repeating: "?", count: keys.count).joined(separator: ", ")
+        let condition = QueryCondition(
+            sql: "\(T.tableName.quoted).\(primaryKey.databaseName.quoted) IN (\(placeholders))",
+            parameters: keys.map(\.data)
+        )
+        var current: [AnyHashable: T] = [:]
+        for record in try await query(T.self).where({ _ in condition }).all() {
+            if let key = PreloadQuery<T>.extractPrimaryKeyPair(from: record, fieldName: primaryKey.name)?.key {
+                current[key] = record
+            }
+        }
+        return keys.map { current[$0.key] }
+    }
+
     public func executeRawQuery(sql: String) async throws -> [PostgresRow] {
         try await executeRawQuery(sql: sql, parameters: [])
+    }
+
+    /// Run a statement written as an `SQLFragment`, like Ecto's `Repo.query`. Interpolated
+    /// values are bound parameters, numbered in order, and a literal `?` stays in the SQL.
+    ///
+    /// ```swift
+    /// let rows = try await repo.executeRawQuery(
+    ///     "SELECT \(identifier: "id"), \(score) FROM \(identifier: "posts") WHERE \(identifier: "id") = ANY(\(ids))"
+    /// )
+    /// ```
+    public func executeRawQuery(_ statement: SQLFragment) async throws -> [PostgresRow] {
+        try await executeRawQuery(sql: renumberPlaceholders(in: statement.sql), parameters: statement.parameters)
     }
 
     /// Clear a soft-deleted record's deletion timestamp and return the record.

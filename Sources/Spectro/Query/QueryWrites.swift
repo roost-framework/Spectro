@@ -123,12 +123,12 @@ extension Query {
     }
 
     /// The WHERE clause selecting the rows to write, with `?` placeholders.
-    /// Joins and row windows need a primary key subquery; plain filters apply directly.
+    /// Joins, row windows, and composed rows need a primary key subquery; plain filters apply directly.
     private func writeFilter() async throws -> (sql: String, parameters: [PostgresData]) {
         try validateJoins()
-        if joins.isEmpty && limitValue == nil && offsetValue == nil {
+        if joins.isEmpty && limitValue == nil && offsetValue == nil && source == nil && distinctColumns == nil {
             let filter = buildWhereClause()
-            return (filter.isEmpty ? "" : " WHERE \(filter)", parameters)
+            return (filter.isEmpty ? "" : " WHERE \(filter)", filterParameters)
         }
         let metadata = await SchemaRegistry.shared.register(T.self)
         guard let primaryKey = metadata.fields.first(where: \.isPrimaryKey)?.databaseName else {
@@ -137,6 +137,8 @@ extension Query {
         let key = qualifiedColumn(primaryKey)
         var rows = self
         rows.lockClause = nil
+        // The key set needs no plain DISTINCT, which would require the ordering in the select list.
+        if rows.distinctColumns?.isEmpty == true { rows.distinctColumns = nil }
         return (" WHERE \(key) IN (\(rows.selectSQL(selectClause: key)))", parameters)
     }
 

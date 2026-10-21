@@ -79,25 +79,37 @@ public struct SoftDelete: Sendable {
     public init(wrappedValue: Date? = nil) { self.wrappedValue = wrappedValue }
 }
 
+/// A foreign key column. Declare it `Optional`, such as `@ForeignKey var editorId: UUID?`,
+/// for a nullable foreign key.
 @propertyWrapper
-public struct ForeignKey<T: PrimaryKeyType>: Sendable, ForeignKeyWrapperProtocol, ColumnNameOverridable {
+public struct ForeignKey<T: ForeignKeyValue>: Sendable, ForeignKeyWrapperProtocol, ColumnNameOverridable {
     public var wrappedValue: T
     public let columnName: String?
 
-    public init(wrappedValue: T = T.defaultValue) {
+    public init(wrappedValue: T = T.foreignKeyDefault) {
         self.wrappedValue = wrappedValue
         self.columnName = nil
     }
 
-    public init(wrappedValue: T = T.defaultValue, _ columnName: String) {
+    public init(wrappedValue: T = T.foreignKeyDefault, _ columnName: String) {
         self.wrappedValue = wrappedValue
         self.columnName = columnName
     }
 
     // MARK: - ForeignKeyWrapperProtocol
-    public var foreignKeyPostgresData: PostgresData { wrappedValue.toPostgresData() }
+    // Primary key types encode without throwing; nil encodes as NULL.
+    public var foreignKeyPostgresData: PostgresData {
+        (try? wrappedValue.toPostgresData()) ?? PostgresData(type: .null, value: nil)
+    }
     public var foreignKeyFieldType: FieldType { T.fieldType }
-    public var foreignKeyHashable: AnyHashable { AnyHashable(wrappedValue) }
+    /// A present optional key hashes like the primary key it refers to.
+    public var foreignKeyHashable: AnyHashable {
+        let optional = Mirror(reflecting: wrappedValue)
+        guard optional.displayStyle == .optional, let key = optional.children.first?.value as? AnyHashable else {
+            return AnyHashable(wrappedValue)
+        }
+        return key
+    }
     public var foreignKeyColumnName: String? { columnName }
     public var foreignKeyValueType: any DatabaseValue.Type { T.self }
 }

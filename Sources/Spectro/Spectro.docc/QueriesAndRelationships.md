@@ -31,6 +31,36 @@ let users = try await repo.query(User.self)
 
 ``QueryCondition/fragment(_:)`` takes an ``SQLFragment``, like Ecto's `fragment`. Interpolated fields become qualified columns and interpolated values become bound parameters, while a literal `?`, such as the `jsonb` operator, stays in the SQL. Filter on a joined table with `$0.table(Post.self).title`.
 
+``Query/orderBy(sql:_:)`` sorts by a fragment, in call order with field sorts, and ``Repo/executeRawQuery(_:)`` runs a whole statement written as a fragment.
+
+### Compose queries
+
+```swift
+let latest = try await repo.query(Post.self).distinct { $0.authorId }.orderBy({ $0.createdAt }, .desc).all()
+let commented = try await repo.query(Post.self)
+    .where { post in .exists(repo.query(Comment.self).where { $0.postId == post.id }) }
+    .all()
+let authors = try await repo.query(User.self)
+    .where { $0.id.in(repo.query(Post.self).select { $0.authorId }) }
+    .all()
+let feed = try await mine.union(pinned).orderBy({ $0.createdAt }, .desc).limit(20).all()
+let subtree = try await repo.query(Category.self)
+    .where { $0.id == rootID }
+    .recursive { $0.left.parentId == $0.right.id }
+    .all()
+```
+
+Projections select columns and SQL expressions, such as aggregates and window functions, with ``QueryBuilder/expression(_:as:)``; a projection of a grouped query returns one result per group:
+
+```swift
+let totals = try await repo.query(Post.self)
+    .groupBy { $0.authorId }
+    .select { ($0.authorId, $0.expression("count(*)", as: Int.self)) }
+    .all()
+```
+
+``Query/distinct()`` and ``Query/distinct(_:)`` remove duplicate rows or keep the first row per value. ``QueryCondition/exists(_:)`` and `in(_:)` take subqueries, which may refer to the outer query's fields. Fields also compare with each other, as in `$0.likes > $0.views`. ``Query/union(_:)`` and the other set operations combine queries that keep their own clauses, and ``Query/recursive(_:)`` follows rows like a recursive CTE. ``Query/exists()`` tests for any matching row, and ``Query/batches(of:)`` reads a large result in primary key batches.
+
 ### Update, delete, and lock many rows
 
 ```swift
@@ -66,7 +96,7 @@ struct Post {
 }
 ```
 
-``ForeignKey`` describes the stored key, while ``HasMany``, ``HasOne``, ``BelongsTo``, and ``ManyToMany`` describe loading relationships. Create actual foreign-key constraints and indexes through migrations.
+``ForeignKey`` describes the stored key, `Optional` for a nullable one, such as `@ForeignKey var editorId: UUID?`, while ``HasMany``, ``HasOne``, ``BelongsTo``, and ``ManyToMany`` describe loading relationships. Create actual foreign-key constraints and indexes through migrations.
 
 ### Preload related records
 

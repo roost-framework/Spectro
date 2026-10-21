@@ -70,9 +70,25 @@ public actor GenericDatabaseRepo: Repo {
     }
 
     public func transaction<T: Sendable>(_ work: @escaping @Sendable (any Repo) async throws -> T) async throws -> T {
-        try await connection.transaction { context in
-            let transactionRepo = TransactionRepo(context: context)
-            return try await work(transactionRepo)
+        try await transaction(isolation: .readCommitted, work)
+    }
+
+    /// Run `work` in a transaction with the given isolation level.
+    ///
+    /// ```swift
+    /// let balance = try await repo.transaction(isolation: .serializable) { tx in
+    ///     // read, check, and write as if no other transaction ran meanwhile
+    /// }
+    /// ```
+    ///
+    /// Under `repeatableRead` and `serializable`, PostgreSQL may abort the transaction with
+    /// SQLSTATE `40001`, read from `SpectroError.serverError`; run it again.
+    public func transaction<T: Sendable>(
+        isolation: TransactionIsolation,
+        _ work: @escaping @Sendable (any Repo) async throws -> T
+    ) async throws -> T {
+        try await connection.transaction(isolation: isolation) { context in
+            try await work(TransactionRepo(context: context))
         }
     }
 
@@ -89,7 +105,10 @@ public actor GenericDatabaseRepo: Repo {
     /// let user = try await repo.insert(cs)
     /// ```
     public func insert<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.insert(changeset)
+        // Preparations and associations write in one transaction with the record. An invalid
+        // changeset throws its validation error without one.
+        guard changeset.needsTransaction, changeset.isValid else { return try await operations.insert(changeset) }
+        return try await unwrapped { try await self.transaction { tx in try await tx.insert(changeset) } }
     }
 
     /// Update an existing record from a validated changeset.
@@ -103,6 +122,17 @@ public actor GenericDatabaseRepo: Repo {
     /// let updated = try await repo.update(cs)
     /// ```
     public func update<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.update(changeset)
+        guard changeset.needsTransaction, changeset.isValid else { return try await operations.update(changeset) }
+        return try await unwrapped { try await self.transaction { tx in try await tx.update(changeset) } }
+    }
+
+    /// Throw the error of a transaction this repository opened itself as the write's own error,
+    /// such as `staleRecord`, as without the transaction.
+    private func unwrapped<T: Sendable>(_ write: () async throws -> T) async throws -> T {
+        do {
+            return try await write()
+        } catch SpectroError.transactionFailed(let underlying) {
+            throw underlying
+        }
     }
 }

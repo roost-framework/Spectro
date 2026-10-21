@@ -24,7 +24,7 @@ public struct SQLMigrations: Sendable {
 }
 
 internal enum RegistryEntry: Sendable {
-    case swift(String, MigrationPlan)
+    case swift(String, MigrationPlan, runsInTransaction: Bool)
     case sql(SQLMigrations)
 }
 
@@ -38,7 +38,7 @@ public struct MigrationEntries: Sendable {
 @resultBuilder
 public enum MigrationRegistryBuilder {
     public static func buildExpression<M: Migration>(_ migration: M) -> MigrationEntries {
-        MigrationEntries([.swift(M.id, migration.change)])
+        MigrationEntries([.swift(M.id, migration.change, runsInTransaction: M.runsInTransaction)])
     }
     public static func buildExpression(_ sql: SQLMigrations) -> MigrationEntries { MigrationEntries([.sql(sql)]) }
     public static func buildBlock(_ entries: MigrationEntries...) -> MigrationEntries { combine(entries) }
@@ -67,8 +67,8 @@ public struct MigrationRegistry: Sendable {
     public func sources() throws -> [MigrationSource] {
         let sources = try entries.entries.map { entry -> MigrationSource in
             switch entry {
-            case .swift(let id, let plan):
-                return .prepared([try MigrationCompiler.prepare(id: id, plan: plan)])
+            case .swift(let id, let plan, let runsInTransaction):
+                return .prepared([try MigrationCompiler.prepare(id: id, plan: plan, runsInTransaction: runsInTransaction)])
             case .sql(let resource):
                 var isDirectory: ObjCBool = false
                 guard let url = resource.directory,

@@ -74,11 +74,20 @@ public actor TransactionRepo: Repo {
     }
 
     public func insert<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.insert(changeset)
+        guard changeset.needsTransaction, changeset.isValid else { return try await operations.insert(changeset) }
+        // A savepoint keeps the writes atomic when the caller catches an error and commits.
+        return try await savepoint { tx in
+            let changeset = try await changeset.prepared(using: tx)
+            return try await changeset.writeAssociations(of: self.operations.insert(changeset), using: tx)
+        }
     }
 
     public func update<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
-        try await operations.update(changeset)
+        guard changeset.needsTransaction, changeset.isValid else { return try await operations.update(changeset) }
+        return try await savepoint { tx in
+            let changeset = try await changeset.prepared(using: tx)
+            return try await changeset.writeAssociations(of: self.operations.update(changeset), using: tx)
+        }
     }
 
     public func transaction<T: Sendable>(_ work: @escaping @Sendable (any Repo) async throws -> T) async throws -> T {

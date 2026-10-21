@@ -175,7 +175,11 @@ public actor DatabaseConnection {
         }
     }
 
+    /// Run `work` in a transaction on one pooled connection: committed when `work` returns,
+    /// rolled back when it throws. In a sandbox, it is a savepoint of the sandbox's transaction,
+    /// whose isolation level applies.
     public func transaction<T: Sendable>(
+        isolation: TransactionIsolation = .readCommitted,
         _ work: @escaping @Sendable (TransactionContext) async throws -> T
     ) async throws -> T {
         if let sandbox = try sandboxBinding() {
@@ -190,7 +194,7 @@ public actor DatabaseConnection {
             let result: T = try await withCheckedThrowingContinuation { continuation in
                 let future: EventLoopFuture<T> = self.pools.withConnection { connection in
                     let context = TransactionContext(connection: connection, instrumentation: instrumentation)
-                    return context.run("BEGIN ISOLATION LEVEL READ COMMITTED").flatMap { _ in
+                    return context.run("BEGIN ISOLATION LEVEL \(isolation.sql)").flatMap { _ in
                         connection.eventLoop.makeFutureWithTask {
                             try await work(context)
                         }

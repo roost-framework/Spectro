@@ -81,6 +81,15 @@ extension Spectro {
         try await repository().transaction(work)
     }
 
+    /// Run `work` in a transaction with the given isolation level.
+    /// See `GenericDatabaseRepo.transaction(isolation:_:)`.
+    public func transaction<T: Sendable>(
+        isolation: TransactionIsolation,
+        _ work: @escaping @Sendable (any Repo) async throws -> T
+    ) async throws -> T {
+        try await repository().transaction(isolation: isolation, work)
+    }
+
     public func get<T: Schema>(_ schema: T.Type, id: some PrimaryKeyType) async throws -> T? {
         try await repository().get(schema, id: id)
     }
