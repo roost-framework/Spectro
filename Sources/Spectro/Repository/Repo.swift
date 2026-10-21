@@ -53,6 +53,18 @@ extension Repo {
         try await executeRawQuery(sql: sql, parameters: [])
     }
 
+    /// Run a statement written as an `SQLFragment`, like Ecto's `Repo.query`. Interpolated
+    /// values are bound parameters, numbered in order, and a literal `?` stays in the SQL.
+    ///
+    /// ```swift
+    /// let rows = try await repo.executeRawQuery(
+    ///     "SELECT \(identifier: "id"), \(score) FROM \(identifier: "posts") WHERE \(identifier: "id") = ANY(\(ids))"
+    /// )
+    /// ```
+    public func executeRawQuery(_ statement: SQLFragment) async throws -> [PostgresRow] {
+        try await executeRawQuery(sql: renumberPlaceholders(in: statement.sql), parameters: statement.parameters)
+    }
+
     /// Clear a soft-deleted record's deletion timestamp and return the record.
     ///
     /// Restoring a record that is not deleted returns it unchanged.

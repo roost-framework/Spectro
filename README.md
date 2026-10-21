@@ -514,9 +514,18 @@ For SQL the builder does not cover, write a fragment, like Ecto's `fragment`. In
 .where { .fragment("\($0.settings) ->> 'theme' = \(theme)") }
 .where { .fragment("\($0.settings) ? 'beta'") }       // a literal ? is the jsonb operator
 .having { _ in .fragment("count(*) > \(10)") }
+.orderBy(sql: { "\($0.score) * \(weight)" }, .desc)    // mixes with field sorts in call order
 ```
 
-Fragments combine with `&&`, `||`, and `!`, and nest: interpolate one `SQLFragment` in another. `\(identifier: name)` inserts a double-quoted identifier.
+Fragments combine with `&&`, `||`, and `!`, and nest: interpolate one `SQLFragment` in another. `\(identifier: name)` inserts a double-quoted identifier. `count()` and aggregates drop the ordering along with its parameters.
+
+Run a whole statement written as a fragment with `executeRawQuery(_:)`, like Ecto's `Repo.query`:
+
+```swift
+let rows = try await repo.executeRawQuery(
+    "SELECT \(identifier: "id") FROM \(identifier: "posts") WHERE \(identifier: "views") > \(100)"
+)
+```
 
 ### Bulk updates and deletes
 

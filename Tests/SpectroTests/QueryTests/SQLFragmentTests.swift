@@ -110,5 +110,62 @@ struct SQLFragmentIntegrationTests {
             #expect(statement.parameters.count == 2)
         }
     }
+
+    @Test("Raw fragment statements number their parameters, also in transactions")
+    func rawStatements() async throws {
+        try await withDocs { repo, _ in
+            let rank = QueryBuilder<FragmentDoc>().rank
+            let statement: SQLFragment = "SELECT \(identifier: "title"), \(rank) * \(10) AS score FROM \(identifier: "fragment_docs") WHERE \(rank) > \(1) AND \(identifier: "labels") ? 'tier'"
+            let rows = try await repo.executeRawQuery(statement)
+            #expect(rows.count == 1)
+            #expect(rows.first?.makeRandomAccess()[data: "title"].string == "GAMMA")
+            #expect(rows.first?.makeRandomAccess()[data: "score"].int == 30)
+
+            let count = try await repo.transaction { tx in
+                try await tx.executeRawQuery("SELECT 1 FROM \(identifier: "fragment_docs") WHERE \(identifier: "rank") >= \(2)").count
+            }
+            #expect(count == 2)
+        }
+    }
+
+    @Test("Expression sorts bind after filters, keep call order with field sorts, and drop out of counts")
+    func expressionOrdering() async throws {
+        try await withDocs { repo, _ in
+            let query = repo.query(FragmentDoc.self)
+                .where { .fragment("\($0.rank) >= \(1)") }
+                .orderBy(sql: { "CASE WHEN \($0.rank) = \(2) THEN 0 ELSE 1 END" })
+                .orderBy({ $0.rank }, .desc)
+                .orderBy(sql: { "\($0.id)" })
+            let statement = try query.statement()
+            #expect(statement.sql.hasSuffix(#"ORDER BY CASE WHEN "fragment_docs"."rank" = $2 THEN 0 ELSE 1 END ASC, "fragment_docs"."rank" DESC, "fragment_docs"."id" ASC"#))
+            #expect(statement.parameters.compactMap(\.int) == [1, 2])
+
+            #expect(try await query.all().map(\.rank) == [2, 3, 1])
+            #expect(try await query.limit(1).offset(1).all().map(\.rank) == [3])
+            #expect(try await query.count() == 3)
+            #expect(try await query.page(size: 2, page: 2).items.map(\.rank) == [1])
+            #expect(try await query.sum { $0.rank } == 6)
+            #expect(try await query.select { $0.title }.all() == ["beta", "GAMMA", "Alpha"])
+            let titles = try await repo.query(FragmentDoc.self)
+                .select { $0.title }
+                .orderBy(sql: { "length(\($0.title)) + \(0)" }, .desc)
+                .orderBy { $0.title }
+                .all()
+            #expect(titles == ["Alpha", "GAMMA", "beta"])
+
+            let grouped = try await repo.query(FragmentDoc.self)
+                .groupBy { $0.ownerId }
+                .having { _ in .fragment("count(*) >= \(1)") }
+                .orderBy(sql: { _ in "count(*) * \(-1)" })
+                .groupedCount()
+            #expect(grouped.map(\.value) == [2, 1])
+
+            // A direct bulk write drops the ordering; a limited one keeps it to pick rows.
+            #expect(try await query.updateAll { [$0.rank.increment(by: 10)] } == 3)
+            #expect(try await query.limit(1).updateAll { [$0.title.set("first")] } == 1)
+            let first = try await repo.query(FragmentDoc.self).where { $0.title == "first" }.first()
+            #expect(first?.rank == 13)
+        }
+    }
 }
 }

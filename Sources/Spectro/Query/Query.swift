@@ -19,7 +19,12 @@ public struct Query<T: Schema>: Sendable {
     private var whereClause: String = ""
     private var whereParameters: [PostgresData] = []
     // Bindings follow SQL clause order, independently of builder call order.
+    /// The bindings of `selectSQL`: joins, where, then order.
     internal var parameters: [PostgresData] {
+        filterParameters + orderFields.flatMap(\.parameters)
+    }
+    /// The bindings of the joins and where alone, for statements without ORDER BY.
+    internal var filterParameters: [PostgresData] {
         joins.flatMap(\.parameters) + whereParameters
     }
     internal var orderFields: [OrderByClause] = []
@@ -240,6 +245,18 @@ public struct Query<T: Schema>: Sendable {
         return copy
     }
 
+    /// Sort by a SQL expression, such as `"\($0.score) * \(weight)"` or `"random()"`. See `SQLFragment`.
+    ///
+    /// Expression and field keys sort in call order, and the expression's values are bound
+    /// parameters. `count()` and aggregates drop the ordering with its parameters.
+    public func orderBy(sql expression: (QueryBuilder<T>) -> SQLFragment, _ direction: OrderDirection = .asc) -> Query<T> {
+        var copy = self
+        let fragment = expression(QueryBuilder<T>())
+        copy.orderFields.append(OrderByClause(field: fragment.sql, direction: direction, parameters: fragment.parameters))
+        copy.referencedTables.formUnion(fragment.referencedTables)
+        return copy
+    }
+
     // MARK: - Field Selection
 
     public func select<V>(_ selector: (QueryBuilder<T>) -> QueryField<V>) -> TupleQuery<T, V> {
@@ -391,7 +408,7 @@ public struct Query<T: Schema>: Sendable {
         let sql = buildCountSQL()
         let results = try await executor.executeQuery(
             sql: sql,
-            parameters: parameters,
+            parameters: filterParameters,
             resultMapper: { row in
                 let randomAccess = row.makeRandomAccess()
                 guard let count = randomAccess[data: "count"].int else {
@@ -439,7 +456,7 @@ public struct Query<T: Schema>: Sendable {
         let sql = buildAggregateSQL(function: function, column: column)
         let results = try await executor.executeQuery(
             sql: sql,
-            parameters: parameters,
+            parameters: filterParameters,
             resultMapper: { row in
                 row.makeRandomAccess()[data: "agg_result"].double
             }
@@ -476,7 +493,7 @@ public struct Query<T: Schema>: Sendable {
         }
 
         let sql = buildGroupedAggregateSQL(function: function, column: column)
-        let allParameters = parameters + havingParameters
+        let allParameters = filterParameters + havingParameters + orderFields.flatMap(\.parameters)
 
         return try await executor.executeQuery(
             sql: sql,
@@ -708,6 +725,11 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
 
     public func orderBy<V>(_ field: (QueryBuilder<T>) -> QueryField<V>, _ direction: OrderDirection) -> TupleQuery<T, Result> {
         TupleQuery<T, Result>(baseQuery: baseQuery.orderBy(field, direction), selectedFields: selectedFields)
+    }
+
+    /// Sort by a SQL expression. See `Query.orderBy(sql:_:)`.
+    public func orderBy(sql expression: (QueryBuilder<T>) -> SQLFragment, _ direction: OrderDirection = .asc) -> TupleQuery<T, Result> {
+        TupleQuery<T, Result>(baseQuery: baseQuery.orderBy(sql: expression, direction), selectedFields: selectedFields)
     }
 
     public func limit(_ count: Int) -> TupleQuery<T, Result> {
@@ -1073,6 +1095,7 @@ func convertToPostgresData(_ value: Any) -> PostgresData {
 internal struct OrderByClause: Sendable {
     let field: String
     let direction: OrderDirection
+    var parameters: [PostgresData] = []
 }
 
 internal struct JoinTableReference: Hashable, Sendable {

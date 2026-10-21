@@ -128,7 +128,7 @@ extension Query {
         try validateJoins()
         if joins.isEmpty && limitValue == nil && offsetValue == nil {
             let filter = buildWhereClause()
-            return (filter.isEmpty ? "" : " WHERE \(filter)", parameters)
+            return (filter.isEmpty ? "" : " WHERE \(filter)", filterParameters)
         }
         let metadata = await SchemaRegistry.shared.register(T.self)
         guard let primaryKey = metadata.fields.first(where: \.isPrimaryKey)?.databaseName else {

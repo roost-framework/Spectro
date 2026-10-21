@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `orderBy(sql:_:)` to `Query` and `TupleQuery`, to sort by an `SQLFragment`. Fragment and field sorts keep call order, and the fragment's parameters bind after the filters'. `count()`, aggregates, and direct bulk writes drop the ordering with its parameters.
+- Add `Repo.executeRawQuery(_:)`, like Ecto's `Repo.query`, to run a statement written as an `SQLFragment`, with its placeholders numbered.
 - Add `DatabaseValue`, Spectro's counterpart of `Ecto.Type`. `@Column`, filters, changesets, selections, and updates accept any conforming type. Built in: `Decimal` (`numeric`), `Data` (`bytea`), arrays of conforming types (`text[]`, `uuid[]`, `integer[]`, …), `[String: Value]` dictionaries (`jsonb`), and `Optional`s of all of them. Conform a raw-value enum to store its raw value; a `String` raw value fits text, varchar, and PostgreSQL enum columns. Conform a `Codable` type to `JSONBValue` to store it as `jsonb`. Implement `toPostgresData()`, `fromPostgresData(_:)`, and optionally `cast(_:)` for other types. `PrimaryKeyType` now refines `DatabaseValue`; existing conformances keep compiling.
 - `@Column` requires a `DatabaseValue` type. Properties of other types compiled but were silently neither stored nor decoded; conform the type, or store it in a plain property.
 - Add `FieldType.custom` and `FieldInfo.valueType`. Add `custom` to exhaustive switches over `FieldType`.

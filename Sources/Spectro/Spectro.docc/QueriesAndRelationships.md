@@ -31,6 +31,8 @@ let users = try await repo.query(User.self)
 
 ``QueryCondition/fragment(_:)`` takes an ``SQLFragment``, like Ecto's `fragment`. Interpolated fields become qualified columns and interpolated values become bound parameters, while a literal `?`, such as the `jsonb` operator, stays in the SQL. Filter on a joined table with `$0.table(Post.self).title`.
 
+``Query/orderBy(sql:_:)`` sorts by a fragment, in call order with field sorts, and ``Repo/executeRawQuery(_:)`` runs a whole statement written as a fragment.
+
 ### Update, delete, and lock many rows
 
 ```swift
