@@ -51,10 +51,17 @@ public enum MigrationCatalog {
               let down = text.range(of: "-- migrate:down"), up.upperBound <= down.lowerBound else {
             throw MigrationError.invalidMigrationFile(file.version)
         }
-        let upSQL = text[up.upperBound..<down.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        // `-- migrate:up transaction:false`, as in dbmate, runs both directions outside a transaction.
+        var upStart = up.upperBound
+        let lineEnd = text[upStart...].firstIndex(of: "\n") ?? text.endIndex
+        let options = text[upStart..<lineEnd].trimmingCharacters(in: .whitespaces)
+        let runsInTransaction = options != "transaction:false"
+        if !runsInTransaction { upStart = lineEnd }
+        let upSQL = text[upStart..<down.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
         let downSQL = text[down.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
         guard !upSQL.isEmpty else { throw MigrationError.invalidMigrationFile(file.version) }
-        return .init(version: file.version, name: file.name, upSQL: upSQL, rollback: .sql(downSQL))
+        return .init(version: file.version, name: file.name, upSQL: upSQL, rollback: .sql(downSQL),
+                     runsInTransaction: runsInTransaction)
     }
 
     private static func validate(_ migration: PreparedMigration) throws {

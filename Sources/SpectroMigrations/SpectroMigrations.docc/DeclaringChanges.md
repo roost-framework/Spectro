@@ -85,4 +85,36 @@ struct ExtendUserProfile: Migration {
 
 ``AlterTableContext/add(_:_:)`` accepts the same column modifiers as a new table. Automatic rollback drops `bio`, then renames `nickname` back to `display_name`. Both top-level operations and operations inside an alteration reverse their order.
 
+Alterations also remove columns, change types, nullability, and defaults, and add check, unique, and foreign-key constraints, each with an automatic rollback:
+
+```swift
+AlterTable("posts") { table in
+    table.remove("legacy_slug", .varchar(length: 80)).notNull()
+    table.alter("views", type: .bigint, from: .integer)
+    table.setNotNull("title")
+    table.setDefault("state", .sql("'draft'"), from: nil)
+    table.check("posts_views_nonnegative", sql: "views >= 0")
+    table.foreignKey("editor_id", references: "users", onDelete: .setNull)
+}
+RenameTable("posts", to: "articles")
+CreateEnum("post_state", values: ["draft", "published"])
+```
+
+Rollback of ``AlterTableContext/remove(_:_:)`` adds the column back, described by the modifiers of ``RemovedColumn``, without its data. ``AlterTableContext/dropConstraint(_:)`` and ``DropIndex`` have no inverse and belong in an explicit branch. Columns take ``MigrationColumnType`` values, including arrays and named types such as an enum from ``CreateEnum``.
+
+### Build indexes concurrently
+
+```swift
+struct IndexIssueTitles: Migration {
+    static let id = "1791129604_index_issue_titles"
+    static let runsInTransaction = false
+
+    var change: MigrationPlan {
+        CreateIndex("issues_title_index", on: "issues", columns: ["title"]).concurrently()
+    }
+}
+```
+
+PostgreSQL forbids `CONCURRENTLY` in a transaction, so set ``Migration/runsInTransaction`` to `false`, like Ecto's `@disable_ddl_transaction`. Each statement then commits on its own, and a failure leaves the statements before it applied.
+
 For drops, type changes, data changes, or a rollback that needs more context, continue with <doc:RollbackAndSQL>.

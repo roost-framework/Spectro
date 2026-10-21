@@ -40,3 +40,38 @@ public struct AlterTable: MigrationStep {
 
     public var migrationPlan: MigrationPlan { MigrationPlan([.alterTable(self)]) }
 }
+
+/// Renames a table; automatic rollback restores its previous name.
+public struct RenameTable: MigrationStep {
+    internal let name: String
+    internal let newName: String
+    internal let schema: String?
+
+    /// Declares the table, its new name, and the optional schema both share.
+    public init(_ name: String, to newName: String, schema: String? = nil) {
+        self.name = name
+        self.newName = newName
+        self.schema = schema
+    }
+
+    public var migrationPlan: MigrationPlan { MigrationPlan([.renameTable(self)]) }
+}
+
+/// Creates an enum type, for columns of type `.named(name)`; automatic rollback drops it.
+///
+/// Its labels are escaped as string literals. Swift enums with matching raw values store
+/// and decode through it.
+public struct CreateEnum: MigrationStep {
+    internal let name: String
+    internal let values: [String]
+    internal let schema: String?
+
+    /// Declares the type and its labels, in sort order.
+    public init(_ name: String, values: [String], schema: String? = nil) {
+        self.name = name
+        self.values = values
+        self.schema = schema
+    }
+
+    public var migrationPlan: MigrationPlan { MigrationPlan([.createEnum(self)]) }
+}

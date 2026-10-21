@@ -49,12 +49,15 @@ Rollback drops the index before the table. For destructive changes, write the re
 - ``MigrationStep``
 - ``CreateTable``
 - ``AlterTable``
+- ``RenameTable``
 - ``CreateIndex``
+- ``CreateEnum``
 
 ### Define columns and constraints
 
 - ``TableDefinitionContext``
 - ``AlterTableContext``
+- ``RemovedColumn``
 - ``ColumnDefinition``
 - ``MigrationColumnType``
 - ``MigrationDefault``
@@ -66,6 +69,7 @@ Rollback drops the index before the table. For destructive changes, write the re
 - ``Irreversible``
 - ``SQL``
 - ``DropTable``
+- ``DropIndex``
 
 ### Register, compile, and run
 

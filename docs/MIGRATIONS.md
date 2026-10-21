@@ -149,6 +149,28 @@ struct ExtendUserProfile: Migration {
 Rollback drops bio, then renames nickname back to display_name. Both top-level operations and operations inside AlterTable reverse order. There is no automatic CASCADE or IF EXISTS.
 
 ~~~swift
+struct ReshapePosts: Migration {
+    static let id = "1791129603_reshape_posts"
+
+    var change: MigrationPlan {
+        CreateEnum("post_state", values: ["draft", "published"])
+        AlterTable("posts") { table in
+            table.remove("legacy_slug", .varchar(length: 80)).notNull()
+            table.alter("views", type: .bigint, from: .integer)
+            table.setNotNull("title")
+            table.setDefault("state", .sql("'draft'"), from: nil)
+            table.check("posts_views_nonnegative", sql: "views >= 0")
+            table.unique("posts_slug_key", columns: ["slug"])
+            table.foreignKey("editor_id", references: "users", onDelete: .setNull)
+        }
+        RenameTable("posts", to: "articles")
+    }
+}
+~~~
+
+Each alteration has an automatic rollback: remove adds the column back as described by its modifiers, without its data; alter restores the old type; setNotNull and dropNotNull invert each other; setDefault restores the old default, nil meaning none; check, unique, and foreignKey drop their constraint. A type change must not need a USING expression, and its rollback fails if the values no longer fit the old type. dropConstraint and DropIndex cannot be inverted, so they belong in an explicit Reversible or Irreversible branch. CreateEnum creates a type for .named columns and drops it on rollback.
+
+~~~swift
 struct CreateIssues: Migration {
     static let id = "1791129602_create_issues"
 
@@ -170,7 +192,24 @@ struct CreateIssues: Migration {
 
 A reference defaults to a table_column_fkey constraint name. Supply name for an explicit name, and schema separately for a referenced schema. It does not create an index. Supported delete actions are noAction, restrict, cascade, setNull and setDefault. SET NULL cannot accompany a non-null column; SET DEFAULT requires a declared default.
 
-The typed column vocabulary is uuid, text, varchar(length:), integer, bigint, boolean, timestamptz, jsonb and numeric(precision:scale:). Named B-tree indexes support multiple columns, unique() and whereSQL for a trusted partial predicate. Composite primary keys and other PostgreSQL features use explicit SQL.
+The typed column vocabulary is uuid, text, varchar(length:), smallint, integer, bigint, real, doublePrecision, numeric(precision:scale:), boolean, date, timestamp, timestamptz, bytea, json and jsonb, arrays of any of them with .array, and other types by name with .named, such as an enum or citext. Named B-tree indexes support multiple columns, unique(), whereSQL for a trusted partial predicate, and concurrently(). Composite primary keys and other PostgreSQL features use explicit SQL.
+
+### Indexes built concurrently
+
+PostgreSQL builds or drops an index CONCURRENTLY without blocking writes, but not inside a transaction. Declare such a migration with runsInTransaction set to false, like Ecto's @disable_ddl_transaction:
+
+~~~swift
+struct IndexIssueTitles: Migration {
+    static let id = "1791129604_index_issue_titles"
+    static let runsInTransaction = false
+
+    var change: MigrationPlan {
+        CreateIndex("issues_title_index", on: "issues", columns: ["title"]).concurrently()
+    }
+}
+~~~
+
+Each statement of such a migration commits on its own, and the ledger records the migration after its last statement, so a failure leaves the statements before it applied. Planning rejects a concurrent index operation in a migration that runs in a transaction. A SQL file opts out the same way, as in dbmate: write `-- migrate:up transaction:false`.
 
 ## Explicit rollback and SQL
 
@@ -221,7 +260,7 @@ struct NormalizeEmail: Migration {
 
 Unpaired SQL and DropTable require an explicit branch. Empty explicit branches are rejected. Irreversible cannot appear inside an explicit down branch. If a selected rollback batch contains an irreversible migration, the entire batch fails preflight before changing the database.
 
-Raw SQL runs in the same transaction as typed operations and the ledger update. Prepared SQL rejects transaction control. CREATE INDEX CONCURRENTLY remains unsupported by this transaction model; its database error rolls back that migration. Dollar-quoted function bodies, escape strings, quoted identifiers and nested comments retain their statement boundaries.
+Raw SQL runs in the same transaction as typed operations and the ledger update. Prepared SQL rejects transaction control. CREATE INDEX CONCURRENTLY needs a migration that does not run in a transaction; see Indexes built concurrently. Dollar-quoted function bodies, escape strings, quoted identifiers and nested comments retain their statement boundaries.
 
 ## Commands and configuration
 

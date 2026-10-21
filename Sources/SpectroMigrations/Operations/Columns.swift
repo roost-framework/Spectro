@@ -1,11 +1,16 @@
 /// PostgreSQL column types supported by the declarative migration DSL.
 ///
-/// Use ``SQL`` for types outside this vocabulary. Length, precision, and scale
-/// are validated when compiling the plan.
-public enum MigrationColumnType: Sendable {
+/// Use `named` for other types, such as an enum made with ``CreateEnum`` or an
+/// extension's `citext`. Length, precision, and scale are validated when compiling the plan.
+public indirect enum MigrationColumnType: Sendable {
     case uuid, text, integer, bigint, boolean, timestamptz, jsonb
+    case smallint, real, doublePrecision, date, timestamp, bytea, json
     case varchar(length: Int)
     case numeric(precision: Int, scale: Int)
+    /// An array of the element type, such as `.array(.text)` for `TEXT[]`.
+    case array(MigrationColumnType)
+    /// A type by name, quoted as one identifier and optionally qualified by its schema.
+    case named(String, schema: String? = nil)
 }
 
 /// A literal column default or an explicitly trusted PostgreSQL expression.

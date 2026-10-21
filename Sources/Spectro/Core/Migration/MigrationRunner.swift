@@ -222,6 +222,15 @@ public final class MigrationRunner: Sendable {
     ) async throws {
         let statements = try SQLStatementParser.parse(sql)
         try Task.checkCancellation()
+        guard migration.runsInTransaction else {
+            // Each statement commits on its own; the ledger records the migration last.
+            for statement in statements {
+                try Task.checkCancellation()
+                try await session.execute(statement)
+            }
+            try await updateMigrationStatus(migration, status: status, using: session)
+            return
+        }
         try await session.execute("BEGIN ISOLATION LEVEL READ COMMITTED")
         do {
             for statement in statements {
