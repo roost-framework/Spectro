@@ -36,7 +36,7 @@ Browse guides and searchable API reference in the [documentation for the latest 
 - **`@Schema` macro** -- generates `SchemaBuilder` and `Encodable` conformance at compile time (zero boilerplate)
 - **Generic primary keys** -- `@ID<UUID>`, `@ID<Int>`, `@ID<String>` via the `PrimaryKeyType` protocol
 - **Immutable query builder** -- `Query<T>` is a value type; every `.where()`, `.join()`, `.orderBy()` returns a new query
-- **Type-safe aggregates** -- `.sum()`, `.avg()`, `.min()`, `.max()`, `.count()` with `GROUP BY` and `HAVING` support
+- **Type-safe aggregates** -- `.sum()`, `.avg()`, `.min()`, `.max()`, `.count()` with `GROUP BY` and `HAVING` support, and typed grouped projections with SQL expressions and window functions
 - **PostgreSQL column types** -- `Decimal`, arrays, `jsonb`, `bytea`, raw-value enums, and your own types through `DatabaseValue`
 - **SQL fragments** -- raw SQL in filters, ordering, and whole statements, with qualified fields and bound values, like Ecto's `fragment`
 - **Query composition** -- `DISTINCT` and `DISTINCT ON`, `IN` and `EXISTS` subqueries, unions, intersections, differences, recursive queries, and column comparisons
@@ -1001,7 +1001,22 @@ let quads: [Tuple4<UUID, String, String, Bool>] = try await repo.query(User.self
     .all()
 ```
 
-`TupleQuery` supports `.where()`, `.orderBy()`, `.limit()`, `.offset()`, `.first()`, `.firstOrFail()`, and `.count()`.
+Select SQL expressions too, such as aggregates of a grouped query or window functions. Each expression decodes as the type you give, an `Optional` when it can be NULL:
+
+```swift
+let totals: [Tuple2<UUID, Int>] = try await repo.query(Post.self)
+    .groupBy { $0.authorId }
+    .having { .fragment("count(*) > \(1)") }
+    .select { ($0.authorId, $0.expression("sum(\($0.views))", as: Int.self)) }
+    .orderBy(sql: { "sum(\($0.views))" }, .desc)
+    .all()
+
+let ranked = try await repo.query(Post.self)
+    .select { ($0.title, $0.expression("rank() OVER (PARTITION BY \($0.authorId) ORDER BY \($0.views) DESC)", as: Int.self)) }
+    .all()
+```
+
+`TupleQuery` supports `.where()`, `.orderBy()`, `.limit()`, `.offset()`, `.distinct()`, `.first()`, `.firstOrFail()`, and `.count()`. A projection of a query with `groupBy` returns one result per group, and `count()` counts the groups.
 
 ## CLI Reference
 

@@ -263,33 +263,31 @@ public struct Query<T: Schema>: Sendable {
 
     // MARK: - Field Selection
 
-    public func select<V>(_ selector: (QueryBuilder<T>) -> QueryField<V>) -> TupleQuery<T, V> {
-        let field = selector(QueryBuilder<T>())
-        return TupleQuery<T, V>(baseQuery: self, selectedFields: [field.name])
+    /// Return one column or expression instead of models.
+    public func select<S: Selection>(_ selector: (QueryBuilder<T>) -> S) -> TupleQuery<T, S.Value> {
+        TupleQuery(baseQuery: self, items: [selector(QueryBuilder<T>()).selectionItem])
     }
 
-    public func select<V1, V2>(_ selector: (QueryBuilder<T>) -> (QueryField<V1>, QueryField<V2>)) -> TupleQuery<T, Tuple2<V1, V2>> {
-        let (f1, f2) = selector(QueryBuilder<T>())
-        return TupleQuery<T, Tuple2<V1, V2>>(
-            baseQuery: self,
-            selectedFields: [f1.name, f2.name]
-        )
+    /// Return two columns or expressions instead of models. With `groupBy`, the projection is grouped.
+    public func select<S1: Selection, S2: Selection>(
+        _ selector: (QueryBuilder<T>) -> (S1, S2)
+    ) -> TupleQuery<T, Tuple2<S1.Value, S2.Value>> {
+        let (s1, s2) = selector(QueryBuilder<T>())
+        return TupleQuery(baseQuery: self, items: [s1.selectionItem, s2.selectionItem])
     }
 
-    public func select<V1, V2, V3>(_ selector: (QueryBuilder<T>) -> (QueryField<V1>, QueryField<V2>, QueryField<V3>)) -> TupleQuery<T, Tuple3<V1, V2, V3>> {
-        let (f1, f2, f3) = selector(QueryBuilder<T>())
-        return TupleQuery<T, Tuple3<V1, V2, V3>>(
-            baseQuery: self,
-            selectedFields: [f1.name, f2.name, f3.name]
-        )
+    public func select<S1: Selection, S2: Selection, S3: Selection>(
+        _ selector: (QueryBuilder<T>) -> (S1, S2, S3)
+    ) -> TupleQuery<T, Tuple3<S1.Value, S2.Value, S3.Value>> {
+        let (s1, s2, s3) = selector(QueryBuilder<T>())
+        return TupleQuery(baseQuery: self, items: [s1.selectionItem, s2.selectionItem, s3.selectionItem])
     }
 
-    public func select<V1, V2, V3, V4>(_ selector: (QueryBuilder<T>) -> (QueryField<V1>, QueryField<V2>, QueryField<V3>, QueryField<V4>)) -> TupleQuery<T, Tuple4<V1, V2, V3, V4>> {
-        let (f1, f2, f3, f4) = selector(QueryBuilder<T>())
-        return TupleQuery<T, Tuple4<V1, V2, V3, V4>>(
-            baseQuery: self,
-            selectedFields: [f1.name, f2.name, f3.name, f4.name]
-        )
+    public func select<S1: Selection, S2: Selection, S3: Selection, S4: Selection>(
+        _ selector: (QueryBuilder<T>) -> (S1, S2, S3, S4)
+    ) -> TupleQuery<T, Tuple4<S1.Value, S2.Value, S3.Value, S4.Value>> {
+        let (s1, s2, s3, s4) = selector(QueryBuilder<T>())
+        return TupleQuery(baseQuery: self, items: [s1.selectionItem, s2.selectionItem, s3.selectionItem, s4.selectionItem])
     }
 
     public func selectFields<V>(_ field: (QueryBuilder<T>) -> QueryField<V>) -> Query<T> {
@@ -532,8 +530,9 @@ public struct Query<T: Schema>: Sendable {
     }
 
     /// The SELECT with unnumbered `?` placeholders, for embedding in another statement.
-    /// Its bindings are `parameters`.
-    internal func selectSQL(selectClause: String? = nil) -> String {
+    /// Its bindings are `parameters`. A `grouped` SELECT, a projection's, also has the
+    /// GROUP BY and HAVING clauses, whose bindings follow the where's.
+    internal func selectSQL(selectClause: String? = nil, grouped: Bool = false) -> String {
         let selection = selectClause ?? buildSelectClause()
         let joinClause = buildJoinClause()
         let orderClause = buildOrderClause()
@@ -544,6 +543,10 @@ public struct Query<T: Schema>: Sendable {
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
         if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
+        if grouped && !groupByFields.isEmpty {
+            sql += " GROUP BY \(groupByFields.map { qualifiedColumn($0) }.joined(separator: ", "))"
+        }
+        if grouped && !havingClause.isEmpty { sql += " HAVING \(havingClause)" }
         if !orderClause.isEmpty { sql += " ORDER BY \(orderClause)" }
         if !limitClause.isEmpty { sql += limitClause }
         if let lockClause { sql += lockClause }
@@ -725,52 +728,63 @@ public struct Query<T: Schema>: Sendable {
 
 public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
     private let baseQuery: Query<T>
-    // Stored as unquoted snake_case; quoted at SQL-build time
+    private let items: [SelectionItem]
+    /// The result column of each item: a table column's name, or an expression's alias.
     private let selectedFields: [String]
 
-    internal init(baseQuery: Query<T>, selectedFields: [String]) {
+    internal init(baseQuery: Query<T>, items: [SelectionItem]) {
         self.baseQuery = baseQuery
-        self.selectedFields = selectedFields
+        self.items = items
+        self.selectedFields = items.enumerated().map { index, item in item.column ?? "spectro_select_\(index)" }
+    }
+
+    private func with(_ query: Query<T>) -> TupleQuery<T, Result> {
+        TupleQuery(baseQuery: query, items: items)
     }
 
     public func `where`(_ condition: (QueryBuilder<T>) -> QueryCondition) -> TupleQuery<T, Result> {
-        TupleQuery<T, Result>(baseQuery: baseQuery.where(condition), selectedFields: selectedFields)
+        with(baseQuery.where(condition))
     }
 
     public func orderBy<V>(_ field: (QueryBuilder<T>) -> QueryField<V>) -> TupleQuery<T, Result> {
-        TupleQuery<T, Result>(baseQuery: baseQuery.orderBy(field), selectedFields: selectedFields)
+        with(baseQuery.orderBy(field))
     }
 
     public func orderBy<V>(_ field: (QueryBuilder<T>) -> QueryField<V>, _ direction: OrderDirection) -> TupleQuery<T, Result> {
-        TupleQuery<T, Result>(baseQuery: baseQuery.orderBy(field, direction), selectedFields: selectedFields)
+        with(baseQuery.orderBy(field, direction))
     }
 
-    /// Sort by a SQL expression. See `Query.orderBy(sql:_:)`.
+    /// Sort by a SQL expression, such as an aggregate of a grouped projection. See `Query.orderBy(sql:_:)`.
     public func orderBy(sql expression: (QueryBuilder<T>) -> SQLFragment, _ direction: OrderDirection = .asc) -> TupleQuery<T, Result> {
-        TupleQuery<T, Result>(baseQuery: baseQuery.orderBy(sql: expression, direction), selectedFields: selectedFields)
+        with(baseQuery.orderBy(sql: expression, direction))
     }
 
     public func limit(_ count: Int) -> TupleQuery<T, Result> {
-        TupleQuery<T, Result>(baseQuery: baseQuery.limit(count), selectedFields: selectedFields)
+        with(baseQuery.limit(count))
     }
 
     public func offset(_ count: Int) -> TupleQuery<T, Result> {
-        TupleQuery<T, Result>(baseQuery: baseQuery.offset(count), selectedFields: selectedFields)
+        with(baseQuery.offset(count))
+    }
+
+    /// Remove duplicate results: `SELECT DISTINCT`. `count()` then counts distinct results.
+    public func distinct() -> TupleQuery<T, Result> {
+        with(baseQuery.distinct())
     }
 
     public func all() async throws -> [Result] {
-        try baseQuery.validateJoins()
-        let sql = buildTupleSQL()
-        return try await baseQuery.executor.executeQuery(
-            sql: sql,
-            parameters: baseQuery.parameters,
+        let context = try inspectionContext()
+        return try await context.executor.executeQuery(
+            sql: context.sql,
+            parameters: context.parameters,
             resultMapper: { row in try mapRowToTuple(row) }
         )
     }
 
     internal func inspectionContext() throws -> (sql: String, parameters: [PostgresData], executor: any QueryExecutor) {
         try baseQuery.validateJoins()
-        return (buildTupleSQL(), baseQuery.parameters, baseQuery.executor)
+        let projection = subquery
+        return (renumberPlaceholders(in: projection.sql), projection.parameters, baseQuery.executor)
     }
 
     public func first() async throws -> Result? {
@@ -784,28 +798,35 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
         return result
     }
 
-    /// Remove duplicate results: `SELECT DISTINCT`. `count()` then counts distinct results.
-    public func distinct() -> TupleQuery<T, Result> {
-        TupleQuery<T, Result>(baseQuery: baseQuery.distinct(), selectedFields: selectedFields)
-    }
-
+    /// The number of results: of rows, or of distinct results or groups.
     public func count() async throws -> Int {
-        guard baseQuery.distinctColumns != nil else { return try await baseQuery.count() }
+        guard baseQuery.distinctColumns != nil || !baseQuery.groupByFields.isEmpty else { return try await baseQuery.count() }
         try baseQuery.validateJoins()
-        return try await baseQuery.distinctRows(selectClause: selection).count()
+        var rows = baseQuery
+        rows.limitValue = nil
+        rows.offsetValue = nil
+        rows.lockClause = nil
+        let projection = with(rows).subquery
+        let counts = try await baseQuery.executor.executeQuery(
+            sql: renumberPlaceholders(in: "SELECT COUNT(*) AS count FROM (\(projection.sql)) AS \"spectro_rows\""),
+            parameters: projection.parameters
+        ) { row in
+            row.makeRandomAccess()[data: "count"].int ?? 0
+        }
+        return counts.first ?? 0
     }
 
-    /// The projected SELECT with `?` placeholders, to embed in another statement.
+    /// The projected SELECT with `?` placeholders and its bindings in clause order, with the
+    /// base query's grouping, to run or to embed in another statement.
     internal var subquery: QuerySource {
-        QuerySource(sql: baseQuery.selectSQL(selectClause: selection), parameters: baseQuery.parameters)
-    }
-
-    private var selection: String {
-        selectedFields.map { baseQuery.qualifiedColumn($0) }.joined(separator: ", ")
-    }
-
-    private func buildTupleSQL() -> String {
-        baseQuery.buildSQL(selectClause: selection)
+        let selection = zip(items, selectedFields).map { item, name in
+            item.column == nil ? "(\(item.sql)) AS \(name.quoted)" : item.sql
+        }.joined(separator: ", ")
+        return QuerySource(
+            sql: baseQuery.selectSQL(selectClause: selection, grouped: true),
+            parameters: items.flatMap(\.parameters) + baseQuery.filterParameters
+                + baseQuery.havingParameters + baseQuery.orderFields.flatMap(\.parameters)
+        )
     }
 
     private func mapRowToTuple(_ row: PostgresRow) throws -> Result {
@@ -830,6 +851,62 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
             }
         }
         throw SpectroError.notImplemented("Result type \(Result.self) must conform to TupleBuildable for multi-field selection")
+    }
+}
+
+// MARK: - Selections
+
+/// A column or SQL expression that `select` returns: a `QueryField` or an `SQLExpression`.
+public protocol Selection<Value>: Sendable {
+    associatedtype Value: Sendable
+    /// The selection's SQL, built by Spectro.
+    var selectionItem: SelectionItem { get }
+}
+
+/// The SQL of a `Selection`.
+public struct SelectionItem: Sendable {
+    let sql: String
+    let parameters: [PostgresData]
+    /// The result column of a table column. An expression has none and gets an alias.
+    let column: String?
+}
+
+extension QueryField: Selection where V: DatabaseValue {
+    public typealias Value = V
+
+    public var selectionItem: SelectionItem {
+        SelectionItem(sql: "\(tableName.quoted).\(name.quoted)", parameters: [], column: name)
+    }
+}
+
+/// A SQL expression that a projection selects and decodes as `Value`, such as an aggregate
+/// or a window function. Make one with `QueryBuilder.expression(_:as:)`.
+public struct SQLExpression<Value: DatabaseValue>: Selection {
+    let fragment: SQLFragment
+
+    public var selectionItem: SelectionItem {
+        SelectionItem(sql: fragment.sql, parameters: fragment.parameters, column: nil)
+    }
+}
+
+extension QueryBuilder {
+    /// Select a SQL expression decoded as `type`. See `SQLFragment`.
+    ///
+    /// ```swift
+    /// let totals = try await repo.query(Post.self)
+    ///     .groupBy { $0.authorId }
+    ///     .select { ($0.authorId, $0.expression("count(*)", as: Int.self)) }
+    ///     .orderBy(sql: { _ in "count(*)" }, .desc)
+    ///     .all()
+    ///
+    /// let ranked = try await repo.query(Post.self)
+    ///     .select { ($0.title, $0.expression("rank() OVER (PARTITION BY \($0.authorId) ORDER BY \($0.views) DESC)", as: Int.self)) }
+    ///     .all()
+    /// ```
+    ///
+    /// Decode an expression that can be NULL, such as `sum` over no rows, as an `Optional`.
+    public func expression<V: DatabaseValue>(_ fragment: SQLFragment, as type: V.Type) -> SQLExpression<V> {
+        SQLExpression(fragment: fragment)
     }
 }
 

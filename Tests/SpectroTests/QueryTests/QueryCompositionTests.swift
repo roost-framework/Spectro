@@ -214,6 +214,42 @@ struct QueryCompositionTests {
         }
     }
 
+    @Test("Projections select expressions, window functions, and grouped aggregates")
+    func expressions() async throws {
+        try await withLibrary { lib in
+            let totals = lib.posts
+                .groupBy { $0.compAuthorId }
+                .having { .fragment("sum(\($0.views)) > \(100)") }
+                .select { ($0.compAuthorId, $0.expression("sum(\($0.views))", as: Int.self), $0.expression("count(*) * \(10)", as: Int.self)) }
+                .orderBy(sql: { "sum(\($0.views))" }, .desc)
+            let rows = try await totals.all()
+            #expect(rows.map(\._0) == [lib.ana.id, lib.bo.id])
+            #expect(rows.map(\._1) == [310, 200])
+            #expect(rows.map(\._2) == [20, 20])
+            #expect(try await totals.count() == 2)
+            #expect(try await totals.limit(1).all().map(\._1) == [310])
+            let statement = try totals.statement()
+            #expect(statement.parameters.map(\.int) == [10, 100])
+            #expect(statement.sql.contains(#"(count(*) * $1) AS "spectro_select_2""#))
+            #expect(statement.sql.contains(#"GROUP BY "comp_posts"."comp_author_id" HAVING (sum("comp_posts"."views") > $2)"#))
+
+            let ranked = try await lib.posts
+                .select { ($0.title, $0.expression("rank() OVER (PARTITION BY \($0.compAuthorId) ORDER BY \($0.views) DESC)", as: Int.self)) }
+                .orderBy { $0.title }
+                .all()
+            #expect(ranked.map(\._1) == [2, 1, 1, 2])
+
+            let none = try await lib.posts.where { $0.views > 1000 }.select { $0.expression("max(\($0.views))", as: Int?.self) }.all()
+            #expect(none == [nil])
+            let boosted = try await lib.posts.where { $0.likes > 100 }.select { $0.expression("\($0.views) + \(5)", as: Int.self) }.all()
+            #expect(boosted == [155])
+
+            let prolific = lib.posts.groupBy { $0.compAuthorId }.having { _ in .fragment("count(*) > \(1)") }.select { $0.compAuthorId }
+            let names = try await lib.repo.query(CompAuthor.self).where { $0.id.in(prolific) }.orderBy { $0.name }.all().map(\.name)
+            #expect(names == ["Ana", "Bo"])
+        }
+    }
+
     @Test("Bulk writes go through distinct rows")
     func distinctWrites() async throws {
         try await withLibrary { lib in

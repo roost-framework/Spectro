@@ -42,13 +42,13 @@ extension Query {
 
     /// The rows the query selects, ignoring limit, offset, and lock as counts do, as the source
     /// of a query that groups and aggregates them.
-    func distinctRows(selectClause: String? = nil) -> Query<T> {
+    func distinctRows() -> Query<T> {
         var rows = self
         rows.limitValue = nil
         rows.offsetValue = nil
         rows.lockClause = nil
         var outer = Query(schema: T.self, executor: executor)
-        outer.source = QuerySource(sql: rows.selectSQL(selectClause: selectClause), parameters: rows.parameters)
+        outer.source = QuerySource(sql: rows.selectSQL(), parameters: rows.parameters)
         outer.groupByFields = groupByFields
         outer.havingClause = havingClause
         outer.havingParameters = havingParameters

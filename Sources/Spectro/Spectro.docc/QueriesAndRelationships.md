@@ -50,6 +50,15 @@ let subtree = try await repo.query(Category.self)
     .all()
 ```
 
+Projections select columns and SQL expressions, such as aggregates and window functions, with ``QueryBuilder/expression(_:as:)``; a projection of a grouped query returns one result per group:
+
+```swift
+let totals = try await repo.query(Post.self)
+    .groupBy { $0.authorId }
+    .select { ($0.authorId, $0.expression("count(*)", as: Int.self)) }
+    .all()
+```
+
 ``Query/distinct()`` and ``Query/distinct(_:)`` remove duplicate rows or keep the first row per value. ``QueryCondition/exists(_:)`` and `in(_:)` take subqueries, which may refer to the outer query's fields. Fields also compare with each other, as in `$0.likes > $0.views`. ``Query/union(_:)`` and the other set operations combine queries that keep their own clauses, and ``Query/recursive(_:)`` follows rows like a recursive CTE. ``Query/exists()`` tests for any matching row, and ``Query/batches(of:)`` reads a large result in primary key batches.
 
 ### Update, delete, and lock many rows

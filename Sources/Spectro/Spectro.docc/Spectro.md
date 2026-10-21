@@ -56,6 +56,10 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 - ``QueryCondition``
 - ``SQLFragment``
 - ``QueryBatches``
+- ``TupleQuery``
+- ``Selection``
+- ``SelectionItem``
+- ``SQLExpression``
 - ``FieldAssignment``
 - ``RowLockStrength``
 - ``RowLockWait``
