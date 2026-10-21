@@ -156,6 +156,7 @@ extension Changeset {
         let removed = loaded.filter { record in recordKey(record).map { !kept.contains($0.key) } ?? false }
 
         var copy = self
+        copy.replaceAssociation(name)
         for (index, child) in children.enumerated() {
             for (field, messages) in child.errors {
                 copy.errors["\(name)[\(index)].\(field)", default: []].append(contentsOf: messages)
@@ -168,7 +169,7 @@ extension Changeset {
         let box = AssociationKeyPath(value: keyPath)
         let foreignKey = Self.foreignKeyProperty(foreignKey, of: Related.self)
         let isLoaded = children.map { child in child.data.flatMap(recordKey).map { byKey[$0.key] != nil } ?? false }
-        copy.associationWrites.append { parent, repo in
+        copy.associationWrites.append((name, { parent, repo in
             let parentKey = try Self.primaryKey(of: parent)
             // Deleting first frees unique values for the records written after.
             for record in removed {
@@ -190,7 +191,7 @@ extension Changeset {
             var result = parent
             result[keyPath: box.value] = SpectroLazyRelation(loaded: records, relationshipInfo: parent[keyPath: box.value].relationshipInfo)
             return result
-        }
+        }))
         return copy
     }
 
@@ -218,6 +219,7 @@ extension Changeset {
         let removed = loadedKey != nil && !isLoaded ? loaded : nil
 
         var copy = self
+        copy.replaceAssociation(name)
         for (field, messages) in child?.errors ?? [:] {
             copy.errors["\(name).\(field)", default: []].append(contentsOf: messages)
         }
@@ -227,7 +229,7 @@ extension Changeset {
 
         let box = AssociationKeyPath(value: keyPath)
         let foreignKey = Self.foreignKeyProperty(foreignKey, of: Related.self)
-        copy.associationWrites.append { parent, repo in
+        copy.associationWrites.append((name, { parent, repo in
             if let removed {
                 try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: removed))
             }
@@ -239,8 +241,15 @@ extension Changeset {
             var result = parent
             result[keyPath: box.value] = SpectroLazyRelation(loaded: record, relationshipInfo: parent[keyPath: box.value].relationshipInfo)
             return result
-        }
+        }))
         return copy
+    }
+
+    /// Drop an earlier cast or put of the relationship `name`, with its errors: a later one
+    /// replaces it, as in Ecto.
+    private mutating func replaceAssociation(_ name: String) {
+        associationWrites.removeAll { $0.relationship == name }
+        errors = errors.filter { key, _ in key != name && !key.hasPrefix("\(name)[") && !key.hasPrefix("\(name).") }
     }
 
     // MARK: - Preparing Changes
@@ -270,7 +279,7 @@ extension Changeset {
     /// Write the cast associations of `record`, just saved, and return it with them loaded.
     func writeAssociations(of record: T, using repo: any Repo) async throws -> T {
         var record = record
-        for write in associationWrites { record = try await write(record, repo) }
+        for (_, write) in associationWrites { record = try await write(record, repo) }
         return record
     }
 
@@ -316,9 +325,12 @@ struct Junction: Sendable {
     let parentColumn: String
     let relatedColumn: String
 
+    /// Insert the join row, unless it exists: a preload may have left it out, or `related`
+    /// may appear twice.
     func link(_ parent: any PrimaryKeyType, _ related: any PrimaryKeyType, using repo: any Repo) async throws {
+        let matches = "\(parentColumn.quoted) = $1 AND \(relatedColumn.quoted) = $2"
         _ = try await repo.executeRawQuery(
-            sql: "INSERT INTO \(table.quoted) (\(parentColumn.quoted), \(relatedColumn.quoted)) VALUES ($1, $2)",
+            sql: "INSERT INTO \(table.quoted) (\(parentColumn.quoted), \(relatedColumn.quoted)) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM \(table.quoted) WHERE \(matches))",
             parameters: [try parent.toPostgresData(), try related.toPostgresData()]
         )
     }

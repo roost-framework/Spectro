@@ -210,6 +210,18 @@ struct ChangesetAssociationTests {
             let invalid = Changeset.cast(reloaded, params: [:], permitted: [])
                 .putAssoc(\.$assocTags, [tag(nil, ["name": ""])], onReplace: .delete)
             #expect(invalid.errors["assocTags[0].name"] == ["can't be blank"])
+            // A later put replaces an earlier one, with its errors.
+            #expect(invalid.putAssoc(\.$assocTags, [elixir], onReplace: .delete).isValid)
+
+            let twice = try await repo.insert(
+                Changeset<AssocAuthor>.cast(nil, params: ["name": "Bo"], permitted: ["name"])
+                    .putAssoc(\.$assocTags, [sql])
+                    .putAssoc(\.$assocTags, [elixir, elixir])
+                    .putAssoc(\.$assocProfile, profile(nil, ["bio": "First"]))
+                    .putAssoc(\.$assocProfile, profile(nil, ["bio": "Second"]))
+            )
+            #expect(try await tagNames(of: twice, in: repo) == ["elixir"])
+            #expect(try await repo.query(AssocProfile.self).where { $0.assocAuthorId == twice.id }.all().map(\.bio) == ["Second"])
         }
     }
 

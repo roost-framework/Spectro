@@ -293,6 +293,16 @@ struct QueryCompositionTests {
             #expect(try await top.all().map(\.title) == ["Banana", "Cherry"])
             #expect(try await top.count() == 2)
             #expect(try await top.limit(1).all().map(\.title) == ["Banana"])
+
+            // Windows see the rows that DISTINCT, LIMIT, and OFFSET leave.
+            let leastViewed = lib.posts.orderBy { $0.views }.limit(2)
+                .qualify { "row_number() OVER (PARTITION BY \($0.compAuthorId) ORDER BY \($0.views) DESC) <= \(1)" }
+            #expect(try await leastViewed.orderBy { $0.title }.all().map(\.title) == ["Apple", "Date"])
+            let distinct = lib.posts.distinct { $0.compAuthorId }.orderBy({ $0.views }, .desc).qualify { _ in "count(*) OVER () = \(2)" }
+            #expect(try await distinct.count() == 2)
+
+            let locked = authors.joinLateral { author in lib.posts.where { $0.compAuthorId == author.id }.lock(.update) }
+            await #expect(throws: SpectroError.self) { try await locked.count() }
         }
     }
 

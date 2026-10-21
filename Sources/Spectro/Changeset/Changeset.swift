@@ -51,8 +51,9 @@ public struct Changeset<T: Schema>: Sendable {
     /// The functions of `prepareChanges(_:)`, in the order they were added.
     var preparations: [@Sendable (Changeset<T>, any Repo) async throws -> Changeset<T>] = []
 
-    /// Writes of `castAssoc`, run once the record is saved, which load the relationship into it.
-    var associationWrites: [@Sendable (T, any Repo) async throws -> T] = []
+    /// Writes of `castAssoc` and `putAssoc` by relationship, run once the record is saved,
+    /// which load the relationship into it.
+    var associationWrites: [(relationship: String, write: @Sendable (T, any Repo) async throws -> T)] = []
 
     /// The set of field names that were permitted during `cast`.
     public let permitted: Set<String>

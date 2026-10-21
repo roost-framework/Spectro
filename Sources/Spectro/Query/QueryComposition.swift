@@ -178,8 +178,9 @@ extension Query {
     /// ```
     ///
     /// The joined rows go by the subquery's table name, or by `alias`, in filters, ordering,
-    /// and `executeJoin(with:as:)`. As with `exists(_:)`, a subquery of the queried table
-    /// itself cannot refer to the outer row.
+    /// and `executeJoin(with:as:)`. The subquery keeps its own soft-delete filter; call
+    /// `withDeleted()` on it to include deleted rows. It cannot lock rows. As with
+    /// `exists(_:)`, a subquery of the queried table itself cannot refer to the outer row.
     public func joinLateral<U: Schema>(as alias: String? = nil, _ subquery: (QueryBuilder<T>) -> Query<U>) -> Query<T> {
         lateral(.inner, alias: alias, subquery)
     }
@@ -192,7 +193,13 @@ extension Query {
     private func lateral<U: Schema>(_ type: JoinType, alias: String?, _ subquery: (QueryBuilder<T>) -> Query<U>) -> Query<T> {
         let rows = subquery(QueryBuilder<T>())
         var source = QuerySource(sql: rows.selectSQL(), parameters: rows.parameters)
-        do { try rows.validateJoins() } catch { source.error = error }
+        do {
+            try rows.validateJoins()
+            // Counts and aggregates drop the outer query's lock, but could not drop this one.
+            guard rows.lockClause == nil else { throw SpectroError.invalidQuery("A lateral subquery cannot lock rows") }
+        } catch {
+            source.error = error
+        }
         var copy = self
         copy.joins.append(JoinClause(
             type: type, table: U.tableName, alias: alias, softDeleteColumn: nil,
@@ -218,16 +225,23 @@ extension Query {
     /// ```
     ///
     /// The window functions see the rows the query selects so far, after its filters, joins,
-    /// ordering, and limit. Clauses added to the result apply to the remaining rows, so add
-    /// ordering and limits after it.
+    /// distinct, ordering, and limit. Clauses added to the result apply to the remaining rows,
+    /// so add ordering and limits after it.
     public func qualify(_ condition: (QueryBuilder<T>) -> SQLFragment) -> Query<T> {
         let fragment = condition(QueryBuilder<T>())
         let table = T.tableName.quoted
         let columns = SchemaRegistry.extractMetadata(from: T.self).fields.map(\.databaseName.quoted).joined(separator: ", ")
-        let rows = selectSQL(selectClause: "\(table).*, (\(fragment.sql)) AS \"spectro_qualify\"")
+        // PostgreSQL computes window functions before DISTINCT and LIMIT, so compute them over
+        // the rows those select; without them, the condition may also refer to joined tables.
+        var rows = self
+        if distinctColumns != nil || limitValue != nil || offsetValue != nil {
+            rows = Query(schema: T.self, executor: executor)
+            rows.source = QuerySource(sql: selectSQL(), parameters: parameters)
+        }
+        let ranked = rows.selectSQL(selectClause: "\(table).*, (\(fragment.sql)) AS \"spectro_qualify\"")
         return composed(
-            sql: "SELECT \(columns) FROM (\(rows)) AS \(table) WHERE \"spectro_qualify\"",
-            parameters: fragment.parameters + parameters,
+            sql: "SELECT \(columns) FROM (\(ranked)) AS \(table) WHERE \"spectro_qualify\"",
+            parameters: fragment.parameters + rows.parameters,
             validating: [self]
         )
     }
