@@ -119,7 +119,7 @@ private struct JoinedProjection<Model: Schema>: Sendable {
             }
             let data = row[data: alias(index)]
             if data.value == nil && field.isNullable { continue }
-            guard let value = SchemaMapper.extractValue(from: data, expectedType: field.type) else {
+            guard let value = field.decode(data) else {
                 throw SpectroError.resultDecodingFailed(column: column, expectedType: String(describing: field.type))
             }
             values[field.name] = value

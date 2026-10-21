@@ -37,8 +37,13 @@ Browse guides and searchable API reference in the [documentation for the latest 
 - **Generic primary keys** -- `@ID<UUID>`, `@ID<Int>`, `@ID<String>` via the `PrimaryKeyType` protocol
 - **Immutable query builder** -- `Query<T>` is a value type; every `.where()`, `.join()`, `.orderBy()` returns a new query
 - **Type-safe aggregates** -- `.sum()`, `.avg()`, `.min()`, `.max()`, `.count()` with `GROUP BY` and `HAVING` support
+- **PostgreSQL column types** -- `Decimal`, arrays, `jsonb`, `bytea`, raw-value enums, and your own types through `DatabaseValue`
+- **SQL fragments** -- raw SQL in filters with qualified fields and bound values, like Ecto's `fragment`
 - **Upsert and bulk insert** -- `ON CONFLICT` upserts and multi-row inserts with automatic batching
-- **Relationship preloading** -- batch-loads `HasMany`, `HasOne`, `BelongsTo`, and `ManyToMany` relationships to prevent N+1 queries
+- **Bulk updates, deletes, and row locks** -- `updateAll`, `deleteAll`, and `FOR UPDATE … SKIP LOCKED`
+- **Relationship preloading** -- batch-loads `HasMany`, `HasOne`, `BelongsTo`, and `ManyToMany` relationships to prevent N+1 queries, nested and customized, on queries or loaded records
+- **Query logging and observation** -- a debug log line and a `QueryEvent` per statement
+- **Test sandbox** -- run tests in a transaction that is always rolled back, like Ecto's SQL sandbox
 - **Transaction support** -- `READ COMMITTED` isolation with automatic rollback; full CRUD and query builder available inside transactions via `QueryExecutor`
 - **Changesets** -- permitted-field casting, validation, serializable errors, and insert/update inside transactions
 - **Pagination and soft deletes** -- counted pages and opt-in deleted-record filtering
@@ -244,6 +249,44 @@ struct User {
 
 Query builders, inserts, and decoding all use the overridden names. `User.column(for: \.name)` returns the database column for a key path (`"display_name"` here, `"team_ref_id"` for `\.teamId`).
 
+### Column types
+
+`@Column` stores any `DatabaseValue`, Spectro's counterpart of `Ecto.Type`. Besides `String`, `Int`, `Bool`, `UUID`, `Date`, `Double`, and `Float`:
+
+```swift
+enum Status: String, Codable, DatabaseValue { case draft, published }
+
+struct Address: Codable, JSONBValue {
+    var city: String
+    var zip: String
+}
+
+@Schema("listings")
+struct Listing {
+    @ID var id: UUID
+    @Column var price: Decimal                     // numeric
+    @Column var status: Status = .draft            // text, varchar, or a PostgreSQL enum
+    @Column var tags: [String]                     // text[]
+    @Column var reviewerIds: [UUID]                // uuid[]
+    @Column var address: Address = Address(city: "", zip: "")  // jsonb
+    @Column var attributes: [String: String]       // jsonb
+    @Column var photo: Data                        // bytea
+    @Column var discount: Decimal?                 // nullable
+}
+```
+
+Give enum and `JSONBValue` properties a default value, as above, since they have no `init()`. A value a property cannot represent, such as an enum label it lacks, fails decoding with `SpectroError.resultDecodingFailed`. `Decimal` holds 38 significant digits and cannot store NaN. Raw-value enums are stored as their raw value; arrays of them need a `text[]` column rather than an array of a PostgreSQL enum type. Changesets cast request input to these types: `"12.50"` to a `Decimal`, `"published"` to a `Status`, and a JSON object to an `Address`.
+
+Conform other types by implementing `toPostgresData()` and `fromPostgresData(_:)`, and optionally `cast(_:)` for changesets and `postgresType` for arrays:
+
+```swift
+struct Cents: DatabaseValue {
+    var amount: Int
+    func toPostgresData() -> PostgresData { PostgresData(int: amount) }
+    static func fromPostgresData(_ data: PostgresData) -> Cents? { data.int.map(Cents.init) }
+}
+```
+
 ### Manual schema definition
 
 If you prefer not to use the macro, implement `Schema` and `SchemaBuilder` manually:
@@ -439,6 +482,11 @@ let total = try await base.count()
 .where { $0.role.notIn(["banned", "suspended"]) }
 .where { $0.age.between(18, and: 65) }
 
+// Arrays
+.where { $0.tags.contains("swift") }                  // 'swift' = ANY(tags)
+.where { $0.tags.containsAll(["swift", "orm"]) }      // tags @> ARRAY[...]
+.where { $0.tags.overlaps(["swift", "elixir"]) }      // tags && ARRAY[...]
+
 // Null checks
 .where { $0.deletedAt.isNull() }
 .where { $0.email.isNotNull() }
@@ -456,6 +504,55 @@ let total = try await base.count()
 .where { ($0.age >= 18) && ($0.isActive == true) }
 .where { !($0.status == "banned") }
 ```
+
+### SQL fragments
+
+For SQL the builder does not cover, write a fragment, like Ecto's `fragment`. Interpolated fields become qualified columns and interpolated values become bound parameters, so values never become SQL text:
+
+```swift
+.where { .fragment("lower(\($0.email)) = lower(\(email))") }
+.where { .fragment("\($0.settings) ->> 'theme' = \(theme)") }
+.where { .fragment("\($0.settings) ? 'beta'") }       // a literal ? is the jsonb operator
+.having { _ in .fragment("count(*) > \(10)") }
+```
+
+Fragments combine with `&&`, `||`, and `!`, and nest: interpolate one `SQLFragment` in another. `\(identifier: name)` inserts a double-quoted identifier.
+
+### Bulk updates and deletes
+
+`updateAll` and `deleteAll` change every row a query matches in one statement, like Ecto's `update_all` and `delete_all`, and return the number of rows changed:
+
+```swift
+let count = try await repo.query(Post.self)
+    .where { $0.authorId == authorID }
+    .updateAll { [
+        $0.views.increment(by: 1),
+        $0.tags.push("featured"),                    // array_append; pull(_:) removes
+        $0.title.set(sql: "upper(\($0.title))"),
+        $0.archivedAt.set(nil),
+    ] }
+
+try await repo.query(Session.self).where { $0.expiresAt.before(Date()) }.deleteAll()
+```
+
+Without a `where`, they change every row, as in Ecto. Joins, ordering, limits, and offsets choose the rows to change. Soft-deleted rows are left alone unless the query uses `withDeleted()`, and `deleteAll()` sets the deletion time of `@SoftDelete` schemas instead of deleting rows.
+
+### Row locks
+
+Inside a transaction, `lock` keeps other transactions from changing the selected rows until it ends:
+
+```swift
+let job = try await spectro.transaction { tx in
+    try await tx.query(Job.self)
+        .where { $0.state == "queued" }
+        .orderBy { $0.insertedAt }
+        .limit(1)
+        .lock(.update, .skipLocked)                  // FOR UPDATE OF "jobs" SKIP LOCKED
+        .first()
+}
+```
+
+Strengths are `.update`, `.noKeyUpdate`, `.share`, and `.keyShare`; `.noWait` fails with SQLSTATE `55P03` instead of waiting. Only the queried table's rows are locked.
 
 ### Ordering
 
@@ -510,7 +607,7 @@ let results = try await repo.query(User.self)
 
 Typed joins use separate column aliases for each model, including custom column names. Nullable fields remain nil; a malformed present row throws a decoding error. Left joins require a nonnullable primary key on the optional side. Model-returning right joins throw because their main model could be absent, which `[T]` and `[(T, U?)]` cannot represent.
 
-Fields in `Query<T>` filters, ordering, selections, grouping, and aggregates refer to `T`'s table, even when a joined table has the same column names. After `executeJoin`, use `.main` and `.joined` to address either model explicitly.
+Fields in `Query<T>` filters, ordering, selections, grouping, and aggregates refer to `T`'s table, even when a joined table has the same column names. Filter on a joined table with `$0.table(Post.self).title == "Hello"`, or `$0.table(User.self, as: "manager")` for an alias. After `executeJoin`, use `.main` and `.joined` to address either model explicitly.
 
 For a `User` schema with `@Column var managerId: UUID?`, a self join can return each user and their optional manager:
 
@@ -614,6 +711,26 @@ let users = try await repo.query(User.self)
 let posts = try await repo.query(Post.self)
     .preload(\.$author, foreignKey: "authorId")
     .all()
+```
+
+Customize the query that loads a relationship, and preload the related records' own relationships. Each level is still one query:
+
+```swift
+let users = try await repo.query(User.self)
+    .preload(\.$posts) { posts in
+        posts.where { $0.published == true }
+            .orderBy({ $0.createdAt }, .desc)
+            .preload(\.$comments)
+    }
+    .all()
+```
+
+A limit in a customization applies to all parents together. For records already fetched, `repo.preload` loads a relationship in one query, also inside transactions:
+
+```swift
+let users = try await repo.query(User.self).all()
+let withPosts = try await repo.preload(users, \.$posts)
+let user = try await repo.preload(users[0], \.$profile)
 ```
 
 Preload queries support chaining with `.where()`, `.orderBy()`, and `.limit()`:
@@ -1007,6 +1124,20 @@ let config = DatabaseConfiguration(
 let spectro = try Spectro(configuration: config)
 ```
 
+Pass `logger` to log each statement at debug level with its SQL, row count, and timings, never its bound values. Pass `onQuery` to receive a `QueryEvent` per statement, with its SQL, parameters, query time, queue time, row count, and error, for metrics or tracing:
+
+```swift
+var logger = Logger(label: "app.db")  // import Logging
+logger.logLevel = .debug
+let config = DatabaseConfiguration(
+    username: "app", password: "secret", database: "production",
+    logger: logger,
+    onQuery: { event in metrics.record(event.sql, event.queryTime) }
+)
+```
+
+The observer runs on a connection's event loop, so keep it fast.
+
 A supplied `tlsConfiguration` requires TLS and retains its certificate verification settings; it never falls back to an unencrypted connection. The default `nil` disables TLS for local connections. Invalid TLS configuration fails initialization.
 
 ## Development
@@ -1084,6 +1215,21 @@ swift test --filter SpectroMigrationsTests
 ```
 
 With an external scratch directory, set `SPECTRO_CLI_PATH` to its built `spectro` executable when running CLI tests. The [migration artifact acceptance](docs/MIGRATIONS.md#verify-the-distribution-contract) additionally checks copied binaries, SQL resources, interruption, and compiler-free deployment.
+
+### Sandbox your application's tests
+
+`spectro.sandbox` runs its body in a transaction that is always rolled back, like Ecto's SQL sandbox. Every repository made from that `Spectro` instance, in the body and its child tasks, uses the transaction, so code under test needs no changes and leaves no data behind:
+
+```swift
+@Test func registration() async throws {
+    try await spectro.sandbox { repo in
+        try await RegistrationService(repo: spectro.repository()).register(email: "ana@example.com")
+        #expect(try await repo.query(User.self).count() == 1)
+    }
+}
+```
+
+Each statement runs in its own savepoint, so a test can expect a constraint error and keep going. `transaction` inside a sandbox becomes a savepoint, so a failed transaction rolls back alone. A transaction holds the sandbox's connection until it ends, and other tasks' statements wait for it, so concurrent transactions cannot undo each other. `Task { }` inherits the sandbox, and its statements throw once the sandbox has ended rather than reaching the database; `Task.detached` uses the pool as usual.
 
 ### Test structure
 

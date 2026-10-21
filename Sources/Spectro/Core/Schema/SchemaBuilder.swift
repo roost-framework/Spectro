@@ -32,37 +32,33 @@ extension SchemaBuilder {
 extension Schema {
     /// Synchronous row mapping for contexts where async is unavailable.
     ///
-    /// Uses `Mirror` reflection on a default instance to discover field names,
-    /// extracts matching column values from the row, and delegates to
-    /// `SchemaBuilder.build(from:)` or `MutableSchema.apply(values:)`.
+    /// Reads field metadata with `Mirror` reflection on a default instance, without
+    /// the `SchemaRegistry` cache, then decodes the row as `from(row:)` does.
     public static func fromSync(row: PostgresRow) throws -> Self {
-        let instance = Self()
+        try buildInstance(from: decodeValues(of: row, fields: SchemaRegistry.extractMetadata(from: self).fields))
+    }
+
+    /// Decode each field's column, keyed by property name. NULL values are omitted.
+    /// - Throws: `SpectroError.resultDecodingFailed` for a value the field's type cannot decode.
+    /// - Parameter allowingMissingColumns: Leave fields without a column at their defaults,
+    ///   as for a subset of columns chosen with `selectFields`, instead of throwing.
+    internal static func decodeValues(of row: PostgresRow, fields: [FieldInfo], allowingMissingColumns: Bool = false) throws -> [String: Any] {
         let randomAccess = row.makeRandomAccess()
         var values: [String: Any] = [:]
-
-        let mirror = Mirror(reflecting: instance)
-        for child in mirror.children {
-            guard let label = child.label else { continue }
-            let fieldName = label.hasPrefix("_") ? String(label.dropFirst()) : label
-            let dbColumn: String
-            if let overridable = child.value as? ColumnNameOverridable,
-               let override = overridable.columnName {
-                dbColumn = override
-            } else {
-                dbColumn = fieldName.snakeCase()
+        for field in fields {
+            guard randomAccess.contains(field.databaseName) else {
+                if allowingMissingColumns { continue }
+                throw SpectroError.resultDecodingFailed(column: "\(tableName).\(field.databaseName)", expectedType: String(describing: field.valueType))
             }
-            let dbValue = randomAccess[data: dbColumn]
-
-            if let v = dbValue.uuid        { values[fieldName] = v }
-            else if let v = dbValue.string  { values[fieldName] = v }
-            else if let v = dbValue.int     { values[fieldName] = v }
-            else if let v = dbValue.bool    { values[fieldName] = v }
-            else if let v = dbValue.date    { values[fieldName] = v }
-            else if let v = dbValue.double  { values[fieldName] = v }
-            else if let v = dbValue.float   { values[fieldName] = v }
+            let data = randomAccess[data: field.databaseName]
+            guard data.value != nil else { continue }
+            // A value the field's type cannot represent fails, rather than becoming the default.
+            guard let value = field.decode(data) else {
+                throw SpectroError.resultDecodingFailed(column: "\(tableName).\(field.databaseName)", expectedType: String(describing: field.valueType))
+            }
+            values[field.name] = value
         }
-
-        return try buildInstance(from: values)
+        return values
     }
 
     internal static func buildInstance(from values: [String: Any]) throws -> Self {
@@ -92,37 +88,16 @@ extension Schema {
     /// Map a PostgreSQL row to a schema instance.
     ///
     /// 1. Registers the schema with `SchemaRegistry` to obtain field metadata.
-    /// 2. Extracts each column value using the `FieldType` enum — no metatype
-    ///    traffic across actor boundaries.
+    /// 2. Decodes each column as its field's `DatabaseValue` type.
     /// 3. Delegates construction to `SchemaBuilder.build(from:)` if available,
     ///    otherwise falls back to `MutableSchema.apply(values:)`.
+    /// - Throws: `SpectroError.resultDecodingFailed` when the row lacks one of the schema's columns.
     public static func from(row: PostgresRow) async throws -> Self {
+        try await from(row: row, allowingMissingColumns: false)
+    }
+
+    internal static func from(row: PostgresRow, allowingMissingColumns: Bool) async throws -> Self {
         let metadata = await SchemaRegistry.shared.register(self)
-        let randomAccess = row.makeRandomAccess()
-
-        var values: [String: Any] = [:]
-
-        for field in metadata.fields {
-            let dbValue = randomAccess[data: field.databaseName]
-
-            switch field.fieldType {
-            case .string:
-                if let v = dbValue.string  { values[field.name] = v }
-            case .int:
-                if let v = dbValue.int     { values[field.name] = v }
-            case .bool:
-                if let v = dbValue.bool    { values[field.name] = v }
-            case .uuid:
-                if let v = dbValue.uuid    { values[field.name] = v }
-            case .date:
-                if let v = dbValue.date    { values[field.name] = v }
-            case .double:
-                if let v = dbValue.double  { values[field.name] = v }
-            case .float:
-                if let v = dbValue.float   { values[field.name] = v }
-            }
-        }
-
-        return try buildInstance(from: values)
+        return try buildInstance(from: decodeValues(of: row, fields: metadata.fields, allowingMissingColumns: allowingMissingColumns))
     }
 }

@@ -32,6 +32,7 @@ public struct Query<T: Schema>: Sendable {
     internal var havingClause: String = ""
     internal var havingParameters: [PostgresData] = []
     private var includeSoftDeleted: Bool = false
+    internal var lockClause: String?
 
     internal init(schema: T.Type, executor: any QueryExecutor) {
         self.schema = schema
@@ -42,6 +43,30 @@ public struct Query<T: Schema>: Sendable {
     public func withDeleted() -> Query<T> {
         var copy = self
         copy.includeSoftDeleted = true
+        return copy
+    }
+
+    // MARK: - Row Locks
+
+    /// Lock the queried table's selected rows until the transaction ends, like Ecto's `lock`.
+    ///
+    /// ```swift
+    /// try await repo.transaction { tx in
+    ///     let job = try await tx.query(Job.self)
+    ///         .where { $0.state == "queued" }
+    ///         .orderBy { $0.insertedAt }
+    ///         .limit(1)
+    ///         .lock(.update, .skipLocked)
+    ///         .first()
+    /// }
+    /// ```
+    ///
+    /// Only the queried table is locked, so outer joins are allowed. Outside a transaction the
+    /// lock is released as soon as the statement ends. Counts and aggregates ignore the lock,
+    /// as PostgreSQL does not lock aggregated rows.
+    public func lock(_ strength: RowLockStrength = .update, _ wait: RowLockWait = .wait) -> Query<T> {
+        var copy = self
+        copy.lockClause = " FOR \(strength.sql) OF \(T.tableName.quoted)\(wait.sql)"
         return copy
     }
 
@@ -310,30 +335,24 @@ public struct Query<T: Schema>: Sendable {
     // that holds the related ID (BelongsTo). When omitted, the convention
     // "<ParentTypeName>Id" is used (e.g. User → "userId").
 
+    /// Load a has-many or many-to-many relationship in one query for all results.
+    /// `customize` adjusts the query that loads the related records; see `PreloadQuery`.
     public func preload<Related: Schema>(
         _ keyPath: WritableKeyPath<T, SpectroLazyRelation<[Related]>>,
-        foreignKey: String? = nil
+        foreignKey: String? = nil,
+        _ customize: PreloadCustomization<Related>? = nil
     ) -> PreloadQuery<T> {
-        // Detect if this is a many-to-many relationship by checking the temp instance
-        let tempInstance = T()
-        let kind = tempInstance[keyPath: keyPath].relationshipInfo.kind
-        if kind == .manyToMany {
-            return PreloadQuery(baseQuery: self, preloaders: [
-                PreloadQuery<T>.manyToManyPreloader(keyPath: keyPath)
-            ])
-        }
-        return PreloadQuery(baseQuery: self, preloaders: [
-            PreloadQuery<T>.hasManyPreloader(keyPath: keyPath, foreignKey: foreignKey)
-        ])
+        PreloadQuery(baseQuery: self, preloaders: []).preload(keyPath, foreignKey: foreignKey, customize)
     }
 
+    /// Load a has-one or belongs-to relationship in one query for all results.
+    /// `customize` adjusts the query that loads the related records; see `PreloadQuery`.
     public func preload<Related: Schema>(
         _ keyPath: WritableKeyPath<T, SpectroLazyRelation<Related?>>,
-        foreignKey: String? = nil
+        foreignKey: String? = nil,
+        _ customize: PreloadCustomization<Related>? = nil
     ) -> PreloadQuery<T> {
-        PreloadQuery(baseQuery: self, preloaders: [
-            PreloadQuery<T>.singlePreloader(keyPath: keyPath, foreignKey: foreignKey)
-        ])
+        PreloadQuery(baseQuery: self, preloaders: []).preload(keyPath, foreignKey: foreignKey, customize)
     }
 
     // MARK: - Execution
@@ -351,7 +370,7 @@ public struct Query<T: Schema>: Sendable {
         )
         var results: [T] = []
         for row in rows {
-            results.append(try await T.from(row: row))
+            results.append(try await T.from(row: row, allowingMissingColumns: selectedFields != nil))
         }
         return results
     }
@@ -485,6 +504,12 @@ public struct Query<T: Schema>: Sendable {
     // MARK: - SQL Building
 
     internal func buildSQL(selectClause: String? = nil) -> String {
+        renumberPlaceholders(in: selectSQL(selectClause: selectClause))
+    }
+
+    /// The SELECT with unnumbered `?` placeholders, for embedding in another statement.
+    /// Its bindings are `parameters`.
+    internal func selectSQL(selectClause: String? = nil) -> String {
         let table = T.tableName.quoted
         let selection = selectClause ?? buildSelectClause()
         let joinClause = buildJoinClause()
@@ -498,8 +523,9 @@ public struct Query<T: Schema>: Sendable {
         if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
         if !orderClause.isEmpty { sql += " ORDER BY \(orderClause)" }
         if !limitClause.isEmpty { sql += limitClause }
+        if let lockClause { sql += lockClause }
 
-        return renumberPlaceholders(in: sql)
+        return sql
     }
 
     internal func buildCountSQL() -> String {
@@ -640,26 +666,6 @@ public struct Query<T: Schema>: Sendable {
         return clause
     }
 
-    // MARK: - Placeholder Renumbering
-    //
-    // Conditions store SQL with `?` as an opaque positional sentinel.
-    // Numbering ($1, $2, …) is applied once here, in a single left-to-right
-    // pass over the fully-assembled SQL string.
-
-    private func renumberPlaceholders(in sql: String) -> String {
-        var result = ""
-        var counter = 0
-        for char in sql {
-            if char == "?" {
-                counter += 1
-                result += "$\(counter)"
-            } else {
-                result.append(char)
-            }
-        }
-        return result
-    }
-
     // MARK: - Helpers
 
     internal func mapRowToSchema(_ row: PostgresRow) async throws -> T {
@@ -743,31 +749,7 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
     }
 
     private func buildTupleSQL() -> String {
-        let table = T.tableName.quoted
-        let selectClause = selectedFields.map { baseQuery.qualifiedColumn($0) }.joined(separator: ", ")
-        let joinClause = baseQuery.buildJoinClause()
-        let effectiveWhere = baseQuery.buildWhereClause()
-        let orderClause = baseQuery.buildOrderClause()
-        let limitClause = baseQuery.buildLimitClause()
-
-        var sql = "SELECT \(selectClause) FROM \(table)"
-
-        if !joinClause.isEmpty { sql += " \(joinClause)" }
-        if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
-        if !orderClause.isEmpty { sql += " ORDER BY \(orderClause)" }
-        if !limitClause.isEmpty { sql += limitClause }
-
-        return renumberPlaceholders(in: sql)
-    }
-
-    private func renumberPlaceholders(in sql: String) -> String {
-        var result = ""
-        var counter = 0
-        for char in sql {
-            if char == "?" { counter += 1; result += "$\(counter)" }
-            else { result.append(char) }
-        }
-        return result
+        baseQuery.buildSQL(selectClause: selectedFields.map { baseQuery.qualifiedColumn($0) }.joined(separator: ", "))
     }
 
     private func mapRowToTuple(_ row: PostgresRow) throws -> Result {
@@ -782,27 +764,16 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
             return result
         }
         if selectedFields.count == 1 {
-            let randomAccess = row.makeRandomAccess()
-            let value = try extractSingleValue(from: randomAccess[data: selectedFields[0]])
-            guard let result = value as? Result else {
+            do {
+                return try extractValue(from: row.makeRandomAccess()[data: selectedFields[0]])
+            } catch {
                 throw SpectroError.resultDecodingFailed(
                     column: selectedFields[0],
                     expectedType: String(describing: Result.self)
                 )
             }
-            return result
         }
         throw SpectroError.notImplemented("Result type \(Result.self) must conform to TupleBuildable for multi-field selection")
-    }
-
-    private func extractSingleValue(from postgresData: PostgresData) throws -> Any {
-        if let v = postgresData.string { return v }
-        if let v = postgresData.int { return v }
-        if let v = postgresData.bool { return v }
-        if let v = postgresData.uuid { return v }
-        if let v = postgresData.date { return v }
-        if let v = postgresData.double { return v }
-        throw SpectroError.resultDecodingFailed(column: "unknown", expectedType: "Any")
     }
 }
 
@@ -814,6 +785,17 @@ public struct QueryBuilder<T: Schema>: Sendable {
 
     public subscript<V>(dynamicMember keyPath: KeyPath<T, V>) -> QueryField<V> {
         QueryField<V>(name: T.column(for: keyPath), tableName: T.tableName)
+    }
+
+    /// Refer to a joined table's columns, by its alias or, without one, its table name.
+    ///
+    /// ```swift
+    /// repo.query(Post.self)
+    ///     .join(User.self) { $0.left.userId == $0.right.id }
+    ///     .where { $0.table(User.self).name == "Ana" }
+    /// ```
+    public func table<Model: Schema>(_ type: Model.Type, as alias: String? = nil) -> JoinQueryField<Model> {
+        JoinQueryField<Model>(tableName: alias ?? Model.tableName)
     }
 }
 
@@ -1005,6 +987,47 @@ extension QueryField where V == Date {
     }
 }
 
+// MARK: - Array Operators
+
+extension QueryField {
+    /// `element = ANY(column)`: the array column contains `element`.
+    public func contains<E: DatabaseValue>(_ element: E) -> QueryCondition where V == [E] {
+        QueryCondition(sql: "? = ANY(\(qualifiedName))", parameters: [convertToPostgresData(element)])
+    }
+
+    /// `column @> elements`: the array column contains every one of `elements`.
+    public func containsAll<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E] {
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) @> ?", parameters: [convertToPostgresData(elements)])
+    }
+
+    /// `column && elements`: the array column shares at least one element with `elements`.
+    public func overlaps<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E] {
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) && ?", parameters: [convertToPostgresData(elements)])
+    }
+
+    /// The nullable form of `contains(_:)`. A NULL array contains nothing.
+    public func contains<E: DatabaseValue>(_ element: E) -> QueryCondition where V == [E]? {
+        QueryCondition(sql: "? = ANY(\(qualifiedName))", parameters: [convertToPostgresData(element)])
+    }
+
+    /// The nullable form of `containsAll(_:)`.
+    public func containsAll<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E]? {
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) @> ?", parameters: [convertToPostgresData(elements)])
+    }
+
+    /// The nullable form of `overlaps(_:)`.
+    public func overlaps<E: DatabaseValue>(_ elements: [E]) -> QueryCondition where V == [E]? {
+        QueryCondition(sql: "\(arrayColumn(of: E.self)) && ?", parameters: [convertToPostgresData(elements)])
+    }
+
+    /// The column cast to the type of a bound `[E]`, as `@>` and `&&` need equal array types:
+    /// `[Int]` binds `bigint[]`, so an `integer[]` column would not match. The cast is free when
+    /// the types already match, which also keeps a GIN index on the column usable.
+    private func arrayColumn<E: DatabaseValue>(of element: E.Type) -> String {
+        E.postgresType.arrayTypeName.map { "\(qualifiedName)::\($0)" } ?? qualifiedName
+    }
+}
+
 extension QueryField {
     public func isNull() -> QueryCondition {
         QueryCondition(sql: "\(qualifiedName) IS NULL")
@@ -1040,17 +1063,9 @@ public prefix func ! (condition: QueryCondition) -> QueryCondition {
 
 // MARK: - PostgresData Conversion
 
-private func convertToPostgresData(_ value: Any) -> PostgresData {
-    switch value {
-    case let v as String: return PostgresData(string: v)
-    case let v as Int: return PostgresData(int: v)
-    case let v as Bool: return PostgresData(bool: v)
-    case let v as UUID: return PostgresData(uuid: v)
-    case let v as Date: return PostgresData(date: v)
-    case let v as Double: return PostgresData(double: v)
-    case let v as Float: return PostgresData(float: v)
-    default: return PostgresData(string: "\(value)")
-    }
+func convertToPostgresData(_ value: Any) -> PostgresData {
+    if let v = value as? any DatabaseValue, let data = try? v.toPostgresData() { return data }
+    return PostgresData(string: "\(value)")
 }
 
 // MARK: - Supporting Types

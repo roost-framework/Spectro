@@ -3,6 +3,7 @@
 @preconcurrency import NIOCore
 @preconcurrency import PostgresKit
 import Foundation
+import Logging
 import NIOSSL
 
 public actor DatabaseConnection {
@@ -13,6 +14,7 @@ public actor DatabaseConnection {
     private nonisolated(unsafe) let pools: EventLoopGroupConnectionPool<PostgresConnectionSource>
     private nonisolated let eventLoopGroup: any EventLoopGroup
     private let configuration: DatabaseConfiguration
+    private nonisolated let instrumentation: QueryInstrumentation
     private var isShutdown = false
 
     /// Tracks the number of in-flight query operations. shutdown() waits for
@@ -20,9 +22,17 @@ public actor DatabaseConnection {
     /// crashes caused by NIO future callbacks accessing a freed pool.
     private var activeOperations = 0
     private var shutdownContinuation: CheckedContinuation<Void, Never>?
+    private var sandboxSavepoints = 0
+    /// Open sandboxes, each with the tasks waiting for its connection. A key is present
+    /// while one of its tasks uses the connection for a transaction.
+    private var openSandboxes: Set<UUID> = []
+    private var sandboxWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    /// The token of the task scope holding each sandbox's connection for a transaction.
+    private var sandboxHolds: [UUID: UUID] = [:]
 
     public init(configuration: DatabaseConfiguration) throws {
         self.configuration = configuration
+        self.instrumentation = QueryInstrumentation(logger: configuration.logger, observer: configuration.onQuery)
         let sqlConfig = SQLPostgresConfiguration(
             hostname: configuration.hostname,
             port: configuration.port,
@@ -66,73 +76,49 @@ public actor DatabaseConnection {
         parameters: [PostgresData] = [],
         resultMapper: @Sendable @escaping (PostgresRow) throws -> T
     ) async throws -> [T] {
-        try beginOperation()
-
-        do {
-            let result: [T] = try await withCheckedThrowingContinuation { continuation in
-                let future: EventLoopFuture<[T]> = self.pools.withConnection { connection in
-                    connection.query(sql, parameters).flatMapThrowing { result in
-                        try result.rows.map(resultMapper)
+        if let sandbox = try sandboxBinding() {
+            return try await withSandboxConnection(sandbox) { inTransaction in
+                // Outside a transaction, a failed statement must not abort the sandbox.
+                guard inTransaction else {
+                    return try await Self.isolatedStatement(sandbox.context) {
+                        try await sandbox.context.query(sql, parameters, mapper: resultMapper)
                     }
                 }
-                future.whenComplete { result in
-                    switch result {
-                    case .success(let rows): continuation.resume(returning: rows)
-                    case .failure(let error): continuation.resume(throwing: SpectroError.queryExecutionFailed(sql: sql, error: error))
-                    }
+                return try await sandbox.context.query(sql, parameters, mapper: resultMapper)
+            }
+        }
+        try beginOperation()
+        defer { endOperation() }
+
+        let instrumentation = self.instrumentation
+        let requested = ContinuousClock.now
+        return try await withCheckedThrowingContinuation { continuation in
+            let future: EventLoopFuture<[PostgresRow]> = self.pools.withConnection { connection in
+                let started = ContinuousClock.now
+                return instrumentation.observe(
+                    connection.query(sql, parameters).map(\.rows),
+                    sql: sql, parameters: parameters, queued: requested.duration(to: started),
+                    started: started, inTransaction: false, rowCount: \.count
+                )
+            }
+            future.whenComplete { result in
+                switch result {
+                case .success(let rows):
+                    do { continuation.resume(returning: try rows.map(resultMapper)) }
+                    catch { continuation.resume(throwing: SpectroError.queryExecutionFailed(sql: sql, error: error)) }
+                case .failure(let error): continuation.resume(throwing: SpectroError.queryExecutionFailed(sql: sql, error: error))
                 }
             }
-            endOperation()
-            return result
-        } catch {
-            endOperation()
-            throw error
         }
     }
 
     public func executeUpdate(sql: String, parameters: [PostgresData] = []) async throws {
-        try beginOperation()
-
-        do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                let future: EventLoopFuture<Void> = self.pools.withConnection { connection in
-                    connection.query(sql, parameters).map { _ in }
-                }
-                future.whenComplete { result in
-                    switch result {
-                    case .success: continuation.resume()
-                    case .failure(let error): continuation.resume(throwing: SpectroError.queryExecutionFailed(sql: sql, error: error))
-                    }
-                }
-            }
-            endOperation()
-        } catch {
-            endOperation()
-            throw error
-        }
+        _ = try await executeQuery(sql: sql, parameters: parameters) { _ in () }
     }
 
     public func execute(sql: String, parameters: [PostgresData] = []) async throws -> Int {
-        try beginOperation()
-
-        do {
-            let result: Int = try await withCheckedThrowingContinuation { continuation in
-                let future: EventLoopFuture<Int> = self.pools.withConnection { connection in
-                    connection.query(sql, parameters).map { _ in 1 }
-                }
-                future.whenComplete { result in
-                    switch result {
-                    case .success(let count): continuation.resume(returning: count)
-                    case .failure(let error): continuation.resume(throwing: SpectroError.queryExecutionFailed(sql: sql, error: error))
-                    }
-                }
-            }
-            endOperation()
-            return result
-        } catch {
-            endOperation()
-            throw error
-        }
+        try await executeUpdate(sql: sql, parameters: parameters)
+        return 1
     }
 
     // MARK: - Transactions
@@ -146,12 +132,12 @@ public actor DatabaseConnection {
         try beginOperation()
         defer { endOperation() }
         try Task.checkCancellation()
-        let connection = try await requestMigrationConnection()
+        let connection = try await requestConnection()
         defer { pools.releaseConnection(connection) }
         do {
             let result = try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                let result = try await work(TransactionContext(connection: connection))
+                let result = try await work(TransactionContext(connection: connection, instrumentation: instrumentation))
                 try Task.checkCancellation()
                 return result
             } onCancel: {
@@ -168,7 +154,8 @@ public actor DatabaseConnection {
         }
     }
 
-    private func requestMigrationConnection() async throws -> PostgresConnection {
+    /// Reserve a pooled connection outside `withConnection`, honoring cancellation.
+    private func requestConnection() async throws -> PostgresConnection {
         let request = MigrationConnectionRequest()
         // AsyncKit cannot remove a queued request. Track it until completion, even
         // if the caller has already cancelled; a late connection is released unused.
@@ -191,22 +178,27 @@ public actor DatabaseConnection {
     public func transaction<T: Sendable>(
         _ work: @escaping @Sendable (TransactionContext) async throws -> T
     ) async throws -> T {
+        if let sandbox = try sandboxBinding() {
+            return try await withSandboxConnection(sandbox) { _ in
+                try await self.sandboxSavepoint(sandbox.context, work)
+            }
+        }
         try beginOperation()
 
         do {
+            let instrumentation = self.instrumentation
             let result: T = try await withCheckedThrowingContinuation { continuation in
                 let future: EventLoopFuture<T> = self.pools.withConnection { connection in
-                    connection.query("BEGIN ISOLATION LEVEL READ COMMITTED").flatMap { _ in
-                        let context = TransactionContext(connection: connection)
-
-                        return connection.eventLoop.makeFutureWithTask {
+                    let context = TransactionContext(connection: connection, instrumentation: instrumentation)
+                    return context.run("BEGIN ISOLATION LEVEL READ COMMITTED").flatMap { _ in
+                        connection.eventLoop.makeFutureWithTask {
                             try await work(context)
                         }
                         .flatMap { result in
-                            connection.query("COMMIT").map { _ in result }
+                            context.end("COMMIT").map { _ in result }
                         }
                         .flatMapError { error in
-                            connection.query("ROLLBACK").flatMapErrorThrowing { rollbackError in
+                            context.end("ROLLBACK").flatMapErrorThrowing { rollbackError in
                                 throw SpectroError.transactionAndRollbackFailed(
                                     original: error,
                                     rollback: rollbackError
@@ -226,6 +218,141 @@ public actor DatabaseConnection {
             return result
         } catch {
             endOperation()
+            throw error
+        }
+    }
+
+    // MARK: - Sandbox
+
+    /// The sandbox transaction of the current task, if it belongs to this connection pool.
+    @TaskLocal private static var sandbox: SandboxBinding?
+    /// The token of the sandbox transaction the current task runs in, if any.
+    @TaskLocal private static var sandboxHold: UUID?
+
+    private struct SandboxBinding: Sendable {
+        let id: UUID
+        let owner: ObjectIdentifier
+        let context: TransactionContext
+    }
+
+    /// The current task's sandbox on this pool. Throws once the sandbox has ended, for a
+    /// task such as `Task { }` that inherited it: its statements must not reach the pool.
+    private func sandboxBinding() throws -> SandboxBinding? {
+        guard let binding = Self.sandbox, binding.owner == ObjectIdentifier(self) else { return nil }
+        guard openSandboxes.contains(binding.id) else {
+            throw SpectroError.invalidQuery("A statement ran after the sandbox it inherited ended. Await tasks started in a sandbox before it returns.")
+        }
+        return binding
+    }
+
+    /// Run `body` in a transaction that is always rolled back, like Ecto's SQL sandbox.
+    ///
+    /// Statements this pool runs from `body` and from tasks that inherit its task-local
+    /// values, such as child tasks and `Task { }`, use that transaction, so data written there
+    /// is visible to them and is discarded afterwards. Each statement outside a transaction
+    /// runs in its own savepoint, so a failed one leaves the sandbox usable. `transaction`
+    /// becomes a savepoint, and holds the connection until it ends, so other tasks' statements
+    /// wait for it. `Task.detached` uses the pool as usual. Statements after the sandbox ends throw.
+    public func sandbox<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
+        if try sandboxBinding() != nil { return try await body() }
+        try beginOperation()
+        defer { endOperation() }
+        let connection = try await requestConnection()
+        defer { pools.releaseConnection(connection) }
+
+        let binding = SandboxBinding(
+            id: UUID(),
+            owner: ObjectIdentifier(self),
+            context: TransactionContext(connection: connection, instrumentation: instrumentation)
+        )
+        openSandboxes.insert(binding.id)
+        let result: Result<T, any Error>
+        do {
+            try await binding.context.execute("BEGIN")
+            result = .success(try await Self.$sandbox.withValue(binding) { try await body() })
+        } catch {
+            result = .failure(error)
+        }
+        // Statements already sent precede the rollback on the connection; later ones throw,
+        // including those of transaction contexts that tasks outliving the body still hold.
+        openSandboxes.remove(binding.id)
+        do {
+            _ = try await binding.context.end("ROLLBACK").get()
+        } catch {
+            // Never return a connection with an open transaction to the pool.
+            try? await connection.close()
+            if case .success = result { throw SpectroError.queryExecutionFailed(sql: "ROLLBACK", error: error) }
+        }
+        return try result.get()
+    }
+
+    /// Run `work` once no other task of the sandbox holds its connection for a transaction.
+    /// `work` learns whether it runs inside such a transaction.
+    private func withSandboxConnection<T: Sendable>(
+        _ sandbox: SandboxBinding,
+        _ work: @Sendable (_ inTransaction: Bool) async throws -> T
+    ) async throws -> T {
+        if let hold = Self.sandboxHold, sandboxHolds[sandbox.id] == hold { return try await work(true) }
+        if sandboxWaiters[sandbox.id] != nil {
+            await withCheckedContinuation { sandboxWaiters[sandbox.id, default: []].append($0) }
+        } else {
+            sandboxWaiters[sandbox.id] = []
+        }
+        // A fresh token: a task that inherits it and outlives the hold waits like the others.
+        let hold = UUID()
+        sandboxHolds[sandbox.id] = hold
+        defer {
+            sandboxHolds[sandbox.id] = nil
+            if let next = sandboxWaiters[sandbox.id]?.first {
+                sandboxWaiters[sandbox.id]?.removeFirst()
+                next.resume()
+            } else {
+                sandboxWaiters[sandbox.id] = nil
+            }
+        }
+        _ = try sandboxBinding()
+        return try await Self.$sandboxHold.withValue(hold) { try await work(false) }
+    }
+
+    /// A transaction inside a sandbox: a savepoint, with the errors `transaction` throws.
+    /// Its context stops working when the savepoint ends.
+    private func sandboxSavepoint<T: Sendable>(
+        _ sandbox: TransactionContext,
+        _ work: @escaping @Sendable (TransactionContext) async throws -> T
+    ) async throws -> T {
+        sandboxSavepoints += 1
+        let name = "spectro_sandbox_\(sandboxSavepoints)".quoted
+        let scope = sandbox.scope()
+        try await scope.execute("SAVEPOINT \(name)")
+        do {
+            let result = try await work(scope)
+            _ = try await scope.end("RELEASE SAVEPOINT \(name)").get()
+            return result
+        } catch {
+            scope.invalidate()
+            do {
+                try await sandbox.execute("ROLLBACK TO SAVEPOINT \(name)")
+            } catch let rollbackError {
+                throw SpectroError.transactionAndRollbackFailed(original: error, rollback: rollbackError)
+            }
+            throw SpectroError.transactionFailed(underlying: error)
+        }
+    }
+
+    /// Run one statement in a savepoint, so its failure does not abort the sandbox transaction.
+    private static func isolatedStatement<T: Sendable>(
+        _ context: TransactionContext,
+        _ statement: () async throws -> T
+    ) async throws -> T {
+        let name = "spectro_sandbox_statement".quoted
+        try await context.execute("SAVEPOINT \(name)")
+        do {
+            let result = try await statement()
+            try await context.execute("RELEASE SAVEPOINT \(name)")
+            return result
+        } catch {
+            try? await context.execute("ROLLBACK TO SAVEPOINT \(name)")
+            try? await context.execute("RELEASE SAVEPOINT \(name)")
             throw error
         }
     }
@@ -306,6 +433,11 @@ public struct DatabaseConfiguration: Sendable {
     public let maxConnectionsPerEventLoop: Int
     public let numberOfThreads: Int
     public let tlsConfiguration: TLSConfiguration?
+    /// Receives a debug message for each statement, with its SQL and timings but not its
+    /// bound values. `nil`, the default, logs nothing.
+    public let logger: Logger?
+    /// Receives a `QueryEvent` for each statement, for metrics or tracing.
+    public let onQuery: QueryObserver?
 
     public init(
         hostname: String = "localhost",
@@ -315,7 +447,9 @@ public struct DatabaseConfiguration: Sendable {
         database: String,
         maxConnectionsPerEventLoop: Int = 4,
         numberOfThreads: Int = System.coreCount,
-        tlsConfiguration: TLSConfiguration? = nil
+        tlsConfiguration: TLSConfiguration? = nil,
+        logger: Logger? = nil,
+        onQuery: QueryObserver? = nil
     ) {
         self.hostname = hostname
         self.port = port
@@ -325,6 +459,8 @@ public struct DatabaseConfiguration: Sendable {
         self.maxConnectionsPerEventLoop = maxConnectionsPerEventLoop
         self.numberOfThreads = numberOfThreads
         self.tlsConfiguration = tlsConfiguration
+        self.logger = logger
+        self.onQuery = onQuery
     }
 
     public static func fromEnvironment() throws -> DatabaseConfiguration {
@@ -369,9 +505,48 @@ public struct DatabaseConfiguration: Sendable {
 
 public struct TransactionContext: @unchecked Sendable {
     let connection: PostgresConnection
+    let instrumentation: QueryInstrumentation
+    private let lifetime: TransactionLifetime
 
-    init(connection: PostgresConnection) {
+    init(connection: PostgresConnection, instrumentation: QueryInstrumentation) {
+        self.init(connection: connection, instrumentation: instrumentation, lifetime: TransactionLifetime(parent: nil))
+    }
+
+    private init(connection: PostgresConnection, instrumentation: QueryInstrumentation, lifetime: TransactionLifetime) {
         self.connection = connection
+        self.instrumentation = instrumentation
+        self.lifetime = lifetime
+    }
+
+    /// A context for part of this transaction, such as a savepoint, that can end on its own.
+    /// It also stops working when this context ends.
+    func scope() -> TransactionContext {
+        TransactionContext(connection: connection, instrumentation: instrumentation, lifetime: TransactionLifetime(parent: lifetime))
+    }
+
+    /// Send one statement on the pinned connection and report it. Once the transaction has
+    /// ended, the statement fails with `SpectroError.noActiveTransaction` instead of reaching
+    /// a connection that may be serving someone else.
+    func run(_ sql: String, _ parameters: [PostgresData] = []) -> EventLoopFuture<[PostgresRow]> {
+        lifetime.whileOpen { send(sql, parameters) }
+            ?? connection.eventLoop.makeFailedFuture(SpectroError.noActiveTransaction)
+    }
+
+    /// Send the statement that ends this context, such as `COMMIT`; later statements fail.
+    func end(_ sql: String) -> EventLoopFuture<[PostgresRow]> {
+        lifetime.close { send(sql, []) }
+    }
+
+    /// End this context without a statement.
+    func invalidate() {
+        lifetime.close {}
+    }
+
+    private func send(_ sql: String, _ parameters: [PostgresData]) -> EventLoopFuture<[PostgresRow]> {
+        instrumentation.observe(
+            connection.query(sql, parameters).map(\.rows),
+            sql: sql, parameters: parameters, queued: nil, started: .now, inTransaction: true, rowCount: \.count
+        )
     }
 
     public func query<T: Sendable>(
@@ -379,29 +554,48 @@ public struct TransactionContext: @unchecked Sendable {
         _ parameters: [PostgresData] = [],
         mapper: @Sendable @escaping (PostgresRow) throws -> T
     ) async throws -> [T] {
-        try await withCheckedThrowingContinuation { continuation in
-            let future = connection.query(sql, parameters).flatMapThrowing { result in
-                try result.rows.map(mapper)
-            }
-            future.whenComplete { result in
-                switch result {
-                case .success(let rows): continuation.resume(returning: rows)
-                case .failure(let error): continuation.resume(throwing: SpectroError.queryExecutionFailed(sql: sql, error: error))
-                }
-            }
+        do {
+            return try await run(sql, parameters).get().map(mapper)
+        } catch let error as SpectroError where error.isNoActiveTransaction {
+            throw error
+        } catch {
+            throw SpectroError.queryExecutionFailed(sql: sql, error: error)
         }
     }
 
     public func execute(_ sql: String, _ parameters: [PostgresData] = []) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            let future = connection.query(sql, parameters).map { _ in }
-            future.whenComplete { result in
-                switch result {
-                case .success: continuation.resume()
-                case .failure(let error): continuation.resume(throwing: SpectroError.queryExecutionFailed(sql: sql, error: error))
-                }
-            }
+        _ = try await query(sql, parameters) { _ in () }
+    }
+}
+
+/// Whether a transaction context may still send statements. Sending holds the locks of the
+/// context and its parents, so a statement is either sent before the one that ends them or fails.
+private final class TransactionLifetime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open = true
+    private let parent: TransactionLifetime?
+
+    init(parent: TransactionLifetime?) {
+        self.parent = parent
+    }
+
+    func whileOpen<T>(_ body: () -> T) -> T? {
+        guard let parent else { return lock.withLock { open ? body() : nil } }
+        return parent.whileOpen { lock.withLock { open ? body() : nil } } ?? nil
+    }
+
+    func close<T>(_ body: () -> T) -> T {
+        lock.withLock {
+            open = false
+            return body()
         }
+    }
+}
+
+private extension SpectroError {
+    var isNoActiveTransaction: Bool {
+        if case .noActiveTransaction = self { return true }
+        return false
     }
 }
 

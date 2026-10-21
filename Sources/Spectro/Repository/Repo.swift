@@ -80,4 +80,50 @@ extension Repo {
         return try await T.from(row: row)
     }
 
+    // MARK: - Preloading Loaded Records
+
+    /// Load a has-many or many-to-many relationship for records already fetched, in one
+    /// query for all of them, like Ecto's `Repo.preload`. `customize` adjusts the query that
+    /// loads the related records; see `PreloadQuery`.
+    public func preload<T: Schema, Related: Schema>(
+        _ records: [T],
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<[Related]>>,
+        foreignKey: String? = nil,
+        _ customize: PreloadCustomization<Related>? = nil
+    ) async throws -> [T] {
+        guard !records.isEmpty else { return records }
+        return try await PreloadQuery<T>.preloader(keyPath, foreignKey: foreignKey, customize)(records, self)
+    }
+
+    /// Load a has-one or belongs-to relationship for records already fetched, in one query
+    /// for all of them.
+    public func preload<T: Schema, Related: Schema>(
+        _ records: [T],
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<Related?>>,
+        foreignKey: String? = nil,
+        _ customize: PreloadCustomization<Related>? = nil
+    ) async throws -> [T] {
+        guard !records.isEmpty else { return records }
+        return try await PreloadQuery<T>.preloader(keyPath, foreignKey: foreignKey, customize)(records, self)
+    }
+
+    /// Load a has-many or many-to-many relationship for one record.
+    public func preload<T: Schema, Related: Schema>(
+        _ record: T,
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<[Related]>>,
+        foreignKey: String? = nil,
+        _ customize: PreloadCustomization<Related>? = nil
+    ) async throws -> T {
+        try await preload([record], keyPath, foreignKey: foreignKey, customize)[0]
+    }
+
+    /// Load a has-one or belongs-to relationship for one record.
+    public func preload<T: Schema, Related: Schema>(
+        _ record: T,
+        _ keyPath: WritableKeyPath<T, SpectroLazyRelation<Related?>>,
+        foreignKey: String? = nil,
+        _ customize: PreloadCustomization<Related>? = nil
+    ) async throws -> T {
+        try await preload([record], keyPath, foreignKey: foreignKey, customize)[0]
+    }
 }

@@ -39,6 +39,8 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 - ``Timestamp``
 - ``SoftDelete``
 - ``PrimaryKeyType``
+- ``DatabaseValue``
+- ``JSONBValue``
 
 ### Validate changes
 
@@ -51,8 +53,14 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 - ``QueryBuilder``
 - ``QueryField``
 - ``QueryCondition``
+- ``SQLFragment``
+- ``FieldAssignment``
+- ``RowLockStrength``
+- ``RowLockWait``
 - ``JoinQuery``
 - ``PreloadQuery``
+- ``ModelQuery``
+- ``PreloadCustomization``
 - ``Page``
 - ``GroupedResult``
 - ``QueryStatement``
@@ -73,6 +81,8 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 - ``TransactionRepo``
 - ``TransactionContext``
 - ``QueryExecutor``
+- ``QueryEvent``
+- ``QueryObserver``
 
 ### Run migrations
 

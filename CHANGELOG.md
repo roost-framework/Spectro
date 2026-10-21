@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- Add `DatabaseValue`, Spectro's counterpart of `Ecto.Type`. `@Column`, filters, changesets, selections, and updates accept any conforming type. Built in: `Decimal` (`numeric`), `Data` (`bytea`), arrays of conforming types (`text[]`, `uuid[]`, `integer[]`, …), `[String: Value]` dictionaries (`jsonb`), and `Optional`s of all of them. Conform a raw-value enum to store its raw value; a `String` raw value fits text, varchar, and PostgreSQL enum columns. Conform a `Codable` type to `JSONBValue` to store it as `jsonb`. Implement `toPostgresData()`, `fromPostgresData(_:)`, and optionally `cast(_:)` for other types. `PrimaryKeyType` now refines `DatabaseValue`; existing conformances keep compiling.
+- `@Column` requires a `DatabaseValue` type. Properties of other types compiled but were silently neither stored nor decoded; conform the type, or store it in a plain property.
+- Add `FieldType.custom` and `FieldInfo.valueType`. Add `custom` to exhaustive switches over `FieldType`.
+- Decode `String` columns of extension and user-defined types, such as `citext` and PostgreSQL enums. They decoded as missing values.
+- Register `@Column` properties of type `Data`. They were neither inserted nor decoded.
+- Add array filters `contains(_:)` (`= ANY`), `containsAll(_:)` (`@>`), and `overlaps(_:)` (`&&`). The latter two cast the column to the bound array type, so `[Int]` filters `integer[]` columns and `[String]` filters `varchar[]` and PostgreSQL enum arrays; the cast is free, and keeps GIN indexes usable, when the types match.
+- `Decimal` holds 38 significant digits: decoding a longer `numeric` fails instead of rounding, encoding NaN throws instead of trapping in PostgresNIO, and changesets reject strings such as `"1,000"` or `"12 USD"` instead of reading their numeric prefix.
+- Add `QueryCondition.fragment(_:)` and `SQLFragment`, like Ecto's `fragment`. Interpolated fields become qualified columns, interpolated values become bound parameters, and a literal `?`, such as the `jsonb` operator, stays in the SQL. Use fragments in `where` and `having`.
+- Add `QueryBuilder.table(_:as:)` to filter on a joined table's columns.
+- Add `Query.updateAll(_:)` and `Query.deleteAll()`, like Ecto's `update_all` and `delete_all`. They return the number of affected rows. Assignments are `set(_:)`, `set(sql:)`, `increment(by:)`, `push(_:)`, and `pull(_:)`. Joins, ordering, limits, and offsets select the affected rows. `deleteAll()` marks rows of `@SoftDelete` schemas as deleted, as `delete` does.
+- Add `Query.lock(_:_:)` for `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, and `FOR KEY SHARE`, with `NOWAIT` or `SKIP LOCKED`. Only the queried table's rows are locked.
+- Preload relationships of preloaded records, and customize the query that loads a relationship: `.preload(\.$posts) { $0.where { … }.orderBy { … }.preload(\.$comments) }`. Many-to-many preloads keep the related query's order.
+- Add `Repo.preload(_:_:)` for records already fetched, in one query for all of them, also inside transactions.
+- Preload belongs-to relationships through nullable foreign key columns such as `@Column var editorId: UUID?`. Accept a preload's `foreignKey:` as a property or a column name; a column name loaded no records. Match many-to-many keys of any `PrimaryKeyType`.
+- Add `logger` and `onQuery` to `DatabaseConfiguration`. The logger receives a debug message for each statement with its SQL, rows, and timings, and never its bound values. `onQuery` receives a `QueryEvent` with the SQL, parameters, query time, queue time, row count, and error of each statement, including `BEGIN`, `COMMIT`, and `ROLLBACK`.
+- Add `Spectro.sandbox(_:)`, like Ecto's SQL sandbox. It runs its body in a transaction that is always rolled back. Every repository of the instance, in the body and the tasks that inherit its task-local values, uses that transaction. `transaction` becomes a savepoint that holds the connection until it ends. Each statement outside a transaction runs in its own savepoint, so a failed one, such as an expected unique violation, leaves the sandbox usable. Statements from a `Task { }` that outlives the sandbox throw instead of reaching the database.
+- A transaction's repository and `TransactionContext` throw `SpectroError.noActiveTransaction` once the transaction has ended. A repository captured by a task that outlived the transaction ran its statements on the released connection, outside any transaction.
+- Insert a record with no inserted columns using `DEFAULT VALUES`. It trapped. `upsert` and `insertAll` without columns throw `SpectroError.invalidSchema`; they trapped or sent invalid SQL.
+- Throw from inserts, upserts, and `SchemaMapper.extractData`, now `throws`, when a value cannot be encoded. The column was silently left out.
+- Size `insertAll` batches to stay under PostgreSQL's 65535 parameters for tables with more than 65 columns.
+- Key `SchemaRegistry` by type identity. Two schema types with the same name, such as nested types in different enclosing types, shared metadata.
+- Throw `SpectroError.resultDecodingFailed` for a non-NULL value a field's type cannot decode, such as an unknown enum label or JSON of another shape. The field silently kept its default, which a later save wrote back.
+- Decode models selected with `selectFields` from a subset of their columns; the other fields keep their defaults. Decoding trapped. Decoding any other result that lacks a model's column throws `SpectroError.resultDecodingFailed` instead of trapping.
+- Share one implementation of CRUD between `GenericDatabaseRepo` and `TransactionRepo`.
+
 ## 2.6.0 — 2026-10-19
 
 - Add explicit aliases to joins and typed joined reads, including self joins and repeated tables. Select a joined occurrence with `executeJoin(with:as:)`; nullable join keys can be compared with nonnullable keys. Duplicate, invalid, and missing alias references fail before execution. Preserve the original join overloads so existing method references still compile.
