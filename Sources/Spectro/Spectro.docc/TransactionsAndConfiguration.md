@@ -39,6 +39,8 @@ let user = try await client.transaction { tx in
 
 Transactions use `READ COMMITTED` isolation unless you pass a ``TransactionIsolation`` to `transaction(isolation:_:)`. Under `repeatableRead` and `serializable`, PostgreSQL may abort a transaction with SQLSTATE `40001`; run it again. The closure receives a ``Repo`` backed by the reserved transaction connection. Use that `tx` for all work that belongs in the transaction, including query builders and changeset writes. Throwing rolls back; successful completion commits.
 
+Spectro names tables without a schema, so `search_path` selects the schema of each statement. For tenant schemas, run `SET LOCAL search_path TO "tenant_42"` as the transaction's first statement; it ends with the transaction instead of staying on a pooled connection.
+
 Calling a separately captured pooled repository inside the closure performs work outside that transaction. Pass `any Repo` to application functions so they can receive either a pooled repository or the transaction's repository.
 
 Nested transactions are unsupported and throw `SpectroError.transactionAlreadyStarted`. To roll back one step without aborting the transaction, call `savepoint(_:)` on the ``TransactionRepo``: it releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Errors that escape the closure come back wrapped in `SpectroError.transactionFailed`; `SpectroError.serverError` returns the underlying PostgreSQL error's SQLSTATE and constraint, or `nil`. Do not retain the transaction repository or ``TransactionContext`` after the closure returns: once the transaction has ended, their statements throw `SpectroError.noActiveTransaction`.

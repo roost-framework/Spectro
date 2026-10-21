@@ -872,6 +872,15 @@ let balance = try await spectro.transaction(isolation: .serializable) { tx in
 }
 ```
 
+Spectro names tables without a schema, so PostgreSQL's `search_path` chooses the schema, which covers Ecto's query prefixes for tenant schemas. Set it with `SET LOCAL` inside a transaction, so it ends with the transaction instead of staying on a pooled connection:
+
+```swift
+let invoices = try await spectro.transaction { tx in
+    try await tx.executeRawSQL(#"SET LOCAL search_path TO "tenant_42""#)
+    return try await tx.query(Invoice.self).where { $0.paid == false }.all()
+}
+```
+
 `savepoint` releases the savepoint when its body returns, and rolls back to it when the body throws, rethrowing the body's error unchanged. Savepoints can nest.
 
 Errors a transaction's body throws come back wrapped in `SpectroError.transactionFailed`, and database errors in `queryExecutionFailed`. `SpectroError.serverError` unwraps them and returns the PostgreSQL error's SQLSTATE, message, constraint, table, column, and detail, or `nil` when the server reported none.
