@@ -37,6 +37,9 @@ extension Changeset {
         with changeset: (Related?, [String: any Sendable]) -> Changeset<Related>
     ) -> Changeset<T> {
         let name = T._keyPathToColumn[keyPath] ?? "\(keyPath)"
+        guard T()[keyPath: keyPath].relationshipInfo.kind == .hasMany else {
+            return addError(name, message: "is not a has-many relationship")
+        }
         var loaded: [Related] = []
         if let data {
             let relation = data[keyPath: keyPath]
@@ -72,6 +75,10 @@ extension Changeset {
         let writes = children
         copy.associationWrites.append { parent, repo in
             let parentKey = try Self.primaryKey(of: parent)
+            // Deleting first frees unique values for the records written after.
+            for record in removed {
+                try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: record))
+            }
             var records: [Related] = []
             for child in writes {
                 if child.existing != nil {
@@ -79,9 +86,6 @@ extension Changeset {
                 } else {
                     records.append(try await repo.insert(child.changeset.putChange(foreignKey, value: parentKey)))
                 }
-            }
-            for record in removed {
-                try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: record))
             }
             var result = parent
             result[keyPath: box.value] = SpectroLazyRelation(loaded: records, relationshipInfo: parent[keyPath: box.value].relationshipInfo)
@@ -92,9 +96,10 @@ extension Changeset {
 
     /// Cast nested params into the record of a has-one relationship, like Ecto's `cast_assoc`.
     ///
-    /// Params update the loaded record, or insert one when there is none. `nil` params leave
-    /// out the loaded record, which `onReplace` then marks invalid or deletes. For an update,
-    /// preload the relationship first. Errors join this changeset's as `"profile.bio"`.
+    /// Params update the loaded record, or insert one when there is none or when they carry
+    /// another primary key. `nil` params, or another key, leave out the loaded record, which
+    /// `onReplace` then marks invalid or deletes. For an update, preload the relationship first.
+    /// Errors join this changeset's as `"profile.bio"`.
     public func castAssoc<Related: Schema>(
         _ keyPath: WritableKeyPath<T, SpectroLazyRelation<Related?>>,
         params: [String: any Sendable]?,
@@ -112,6 +117,17 @@ extension Changeset {
             guard relation.isLoaded else { return addError(name, message: "must be preloaded before casting") }
             existing = relation.value ?? nil
         }
+        // Params carrying another record's key replace the loaded record, as in Ecto.
+        var removed: Related?
+        if let loaded = existing {
+            let relatedKey = SchemaRegistry.extractMetadata(from: Related.self).primaryKeyField
+            let loadedKey = relatedKey.flatMap { PreloadQuery<Related>.extractPrimaryKeyPair(from: loaded, fieldName: $0)?.key }
+            let givenKey = params.flatMap { paramsKey($0, field: relatedKey, type: Related.self) }
+            if params == nil || (givenKey != nil && givenKey != loadedKey) {
+                removed = loaded
+                existing = nil
+            }
+        }
         let child = params.map { changeset(existing, $0) }
         let current = existing
 
@@ -119,22 +135,22 @@ extension Changeset {
         for (field, messages) in child?.errors ?? [:] {
             copy.errors["\(name).\(field)", default: []].append(contentsOf: messages)
         }
-        let removed = child == nil ? current : nil
         if removed != nil && onReplace == .markAsInvalid {
             copy.errors[name, default: []].append("is invalid")
         }
 
         let box = AssociationKeyPath(value: keyPath)
         let foreignKey = Self.foreignKeyProperty(foreignKey, of: Related.self)
+        let replaced = removed
         copy.associationWrites.append { parent, repo in
+            if let replaced {
+                try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: replaced))
+            }
             var record: Related?
             if let child {
                 record = current != nil
                     ? try await repo.update(child)
                     : try await repo.insert(child.putChange(foreignKey, value: try Self.primaryKey(of: parent)))
-            }
-            if let removed {
-                try await repo.delete(Related.self, id: try Changeset<Related>.primaryKey(of: removed))
             }
             var result = parent
             result[keyPath: box.value] = SpectroLazyRelation(loaded: record, relationshipInfo: parent[keyPath: box.value].relationshipInfo)

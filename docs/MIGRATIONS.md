@@ -155,7 +155,7 @@ struct ReshapePosts: Migration {
     var change: MigrationPlan {
         CreateEnum("post_state", values: ["draft", "published"])
         AlterTable("posts") { table in
-            table.remove("legacy_slug", .varchar(length: 80)).notNull()
+            table.remove("legacy_slug", .varchar(length: 80)).notNull().default("")
             table.alter("views", type: .bigint, from: .integer)
             table.setNotNull("title")
             table.setDefault("state", .sql("'draft'"), from: nil)
@@ -168,7 +168,7 @@ struct ReshapePosts: Migration {
 }
 ~~~
 
-Each alteration has an automatic rollback: remove adds the column back as described by its modifiers, without its data; alter restores the old type; setNotNull and dropNotNull invert each other; setDefault restores the old default, nil meaning none; check, unique, and foreignKey drop their constraint. A type change must not need a USING expression, and its rollback fails if the values no longer fit the old type. dropConstraint and DropIndex cannot be inverted, so they belong in an explicit Reversible or Irreversible branch. CreateEnum creates a type for .named columns and drops it on rollback.
+Each alteration has an automatic rollback: remove adds the column back as described by its modifiers, without its data, so a NOT NULL column needs a default for the rows that exist then; alter restores the old type; setNotNull and dropNotNull invert each other; setDefault restores the old default, nil meaning none; check, unique, and foreignKey drop their constraint. A type change must not need a USING expression, and its rollback fails if the values no longer fit the old type. dropConstraint and DropIndex cannot be inverted, so they belong in an explicit Reversible or Irreversible branch. CreateEnum creates a type for .named columns and drops it on rollback.
 
 ~~~swift
 struct CreateIssues: Migration {
@@ -209,7 +209,7 @@ struct IndexIssueTitles: Migration {
 }
 ~~~
 
-Each statement of such a migration commits on its own, and the ledger records the migration after its last statement, so a failure leaves the statements before it applied. Planning rejects a concurrent index operation in a migration that runs in a transaction. A SQL file opts out the same way, as in dbmate: write `-- migrate:up transaction:false`.
+Each statement of such a migration commits on its own, and the ledger records the migration after its last statement, so a failure leaves the statements before it applied and the migration pending. Before running it again, undo what it applied; a failed CREATE INDEX CONCURRENTLY leaves an INVALID index to drop. Planning rejects a concurrent index operation in a migration that runs in a transaction. A SQL file opts out the same way, as in dbmate: write `-- migrate:up transaction:false`.
 
 ## Explicit rollback and SQL
 

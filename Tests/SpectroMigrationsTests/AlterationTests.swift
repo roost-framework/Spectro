@@ -52,6 +52,16 @@ struct AlterationTests {
         #expect(foreignKey.lowerBound < column.lowerBound)
     }
 
+    struct RemoveRequired: Migration {
+        static let id = "1700000108_remove_required"
+        var change: MigrationPlan { AlterTable("posts") { $0.remove("slug", .text).notNull() } }
+    }
+
+    @Test("A removed NOT NULL column needs a default for its rollback")
+    func removedRequired() throws {
+        #expect(throws: MigrationPlanningError.self) { try MigrationCompiler.prepare(RemoveRequired()) }
+    }
+
     struct DropCheck: Migration {
         static let id = "1700000101_drop_check"
         var change: MigrationPlan { AlterTable("posts") { $0.dropConstraint("views_positive") } }

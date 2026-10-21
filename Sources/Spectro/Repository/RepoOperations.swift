@@ -254,7 +254,8 @@ struct RepoOperations: Sendable {
         var lock: (column: String, value: PostgresData)?
         if let field = changeset.lockField {
             guard let column = metadata.fields.first(where: { $0.name == field })?.databaseName,
-                  let version = changeset.extractFieldValue(from: existingData, named: field) as? Int else {
+                  // Like Ecto, a version cast from params, such as a form's hidden field, wins.
+                  let version = changeset.getField(field) as? Int else {
                 throw SpectroError.invalidField(schema: String(describing: T.self), field: field)
             }
             changes[field] = version + 1

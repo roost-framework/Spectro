@@ -150,6 +150,9 @@ public enum MigrationCompiler {
                     up.append("ALTER TABLE \(name) RENAME COLUMN \(old) TO \(new)")
                     down.insert("ALTER TABLE \(name) RENAME COLUMN \(new) TO \(old)", at: 0)
                 case .remove(let column):
+                    guard !column.required || column.defaultValue != nil else {
+                        throw MigrationPlanningError(reason: "Removed column \(column.name): a NOT NULL column needs a default so that rollback can add it back to existing rows")
+                    }
                     up.append("ALTER TABLE \(name) DROP COLUMN \(try SQL.identifier(column.name))")
                     down.insert("ALTER TABLE \(name) ADD COLUMN \(try SQL.column(column, table: table.name))", at: 0)
                 case .alterType(let column, let type, let oldType):

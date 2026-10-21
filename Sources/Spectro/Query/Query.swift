@@ -492,7 +492,7 @@ public struct Query<T: Schema>: Sendable {
 
     private func groupedAggregateExecute(function: String, column: String) async throws -> [GroupedResult] {
         try validateJoins()
-        if distinctColumns != nil { return try await distinctRows().groupedAggregateExecute(function: function, column: column) }
+        if distinctColumns != nil { return try await distinctRows(grouped: true).groupedAggregateExecute(function: function, column: column) }
         guard !groupByFields.isEmpty else {
             throw SpectroError.invalidQuery("grouped\(function.lowercased().capitalized)() requires at least one groupBy() clause")
         }

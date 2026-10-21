@@ -121,6 +121,41 @@ struct ChangesetAssociationTests {
         }
     }
 
+    @Test("Association writes stay atomic in a caller's transaction, and has-one params with another key replace the record")
+    func atomicityAndReplacement() async throws {
+        try await withTables { repo in
+            let created = try await repo.insert(
+                Changeset<AssocAuthor>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
+                    .castAssoc(\.$assocPosts, params: [["title": "Gone"]], with: post)
+                    .castAssoc(\.$assocProfile, params: ["bio": "Old"], with: profile)
+            )
+            let author = try await repo.query(AssocAuthor.self).where { $0.id == created.id }
+                .preload(\.$assocPosts).preload(\.$assocProfile).first()!
+            let gone = try #require(author.assocPosts.first)
+            try await repo.delete(AssocPost.self, id: gone.id)
+
+            let changeset = Changeset.cast(author, params: ["name": "Renamed"], permitted: ["name"])
+                .castAssoc(\.$assocPosts, params: [["title": "Added"], ["id": gone.id.uuidString, "title": "Edited"]], with: post)
+            try await repo.transaction { tx in
+                do { _ = try await tx.update(changeset) } catch {}
+            }
+            #expect(try await repo.reload(author)?.name == "Ana")
+            #expect(try await repo.query(AssocPost.self).count() == 0)
+
+            let replaced = try await repo.update(
+                Changeset.cast(author, params: [:], permitted: [])
+                    .castAssoc(\.$assocProfile, params: ["id": UUID().uuidString, "bio": "Fresh"], onReplace: .delete, with: profile)
+            )
+            #expect(replaced.assocProfile?.bio == "Fresh")
+            #expect(replaced.assocProfile?.id != author.assocProfile?.id)
+            #expect(try await repo.query(AssocProfile.self).count() == 1)
+
+            let manyToMany = Changeset<NestAuthor>.cast(nil, params: ["name": "Ana"], permitted: ["name"])
+                .castAssoc(\.$genres, params: [], with: { genre, params in Changeset.cast(genre, params: params, permitted: ["name"]) })
+            #expect(manyToMany.errors["genres"] == ["is not a has-many relationship"])
+        }
+    }
+
     @Test("Preparations run in the write's transaction, and not for an invalid changeset")
     func preparations() async throws {
         try await withTables { repo in

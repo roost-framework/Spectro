@@ -39,6 +39,9 @@ struct OptionalForeignKeyTests {
         #expect(bo.squadId == nil)
         #expect(Recruit().squadId == nil)
 
+        #expect(try await bo.loadBelongsTo(Squad.self, foreignKey: "squadId", using: repo) == nil)
+        #expect(try await ana.loadBelongsTo(Squad.self, foreignKey: "squadId", using: repo)?.name == "Red")
+
         let unassigned = try await repo.query(Recruit.self).where { $0.squadId.isNull() }.all()
         #expect(unassigned.map(\.name) == ["Bo"])
         let assigned = try await repo.query(Recruit.self).where { $0.squadId == squad.id }.all()

@@ -137,6 +137,8 @@ extension Query {
         let key = qualifiedColumn(primaryKey)
         var rows = self
         rows.lockClause = nil
+        // The key set needs no plain DISTINCT, which would require the ordering in the select list.
+        if rows.distinctColumns?.isEmpty == true { rows.distinctColumns = nil }
         return (" WHERE \(key) IN (\(rows.selectSQL(selectClause: key)))", parameters)
     }
 

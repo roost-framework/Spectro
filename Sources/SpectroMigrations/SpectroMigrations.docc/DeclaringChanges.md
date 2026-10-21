@@ -89,7 +89,7 @@ Alterations also remove columns, change types, nullability, and defaults, and ad
 
 ```swift
 AlterTable("posts") { table in
-    table.remove("legacy_slug", .varchar(length: 80)).notNull()
+    table.remove("legacy_slug", .varchar(length: 80)).notNull().default("")
     table.alter("views", type: .bigint, from: .integer)
     table.setNotNull("title")
     table.setDefault("state", .sql("'draft'"), from: nil)
@@ -100,7 +100,7 @@ RenameTable("posts", to: "articles")
 CreateEnum("post_state", values: ["draft", "published"])
 ```
 
-Rollback of ``AlterTableContext/remove(_:_:)`` adds the column back, described by the modifiers of ``RemovedColumn``, without its data. ``AlterTableContext/dropConstraint(_:)`` and ``DropIndex`` have no inverse and belong in an explicit branch. Columns take ``MigrationColumnType`` values, including arrays and named types such as an enum from ``CreateEnum``.
+Rollback of ``AlterTableContext/remove(_:_:)`` adds the column back, described by the modifiers of ``RemovedColumn``, without its data; a NOT NULL column needs a default for the existing rows. ``AlterTableContext/dropConstraint(_:)`` and ``DropIndex`` have no inverse and belong in an explicit branch. Columns take ``MigrationColumnType`` values, including arrays and named types such as an enum from ``CreateEnum``.
 
 ### Build indexes concurrently
 
@@ -115,6 +115,6 @@ struct IndexIssueTitles: Migration {
 }
 ```
 
-PostgreSQL forbids `CONCURRENTLY` in a transaction, so set ``Migration/runsInTransaction`` to `false`, like Ecto's `@disable_ddl_transaction`. Each statement then commits on its own, and a failure leaves the statements before it applied.
+PostgreSQL forbids `CONCURRENTLY` in a transaction, so set ``Migration/runsInTransaction`` to `false`, like Ecto's `@disable_ddl_transaction`. Each statement then commits on its own, and a failure leaves the statements before it applied and the migration pending: undo them, such as an INVALID index a failed concurrent build leaves, before running it again.
 
 For drops, type changes, data changes, or a rollback that needs more context, continue with <doc:RollbackAndSQL>.

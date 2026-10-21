@@ -13,7 +13,7 @@ extension Query {
     /// ```
     ///
     /// Each batch is one query that resumes after the previous batch's last key, so a row
-    /// written meanwhile may or may not appear. Iterate in a `repeatableRead` transaction to read
+    /// written meanwhile may or may not appear. A row a join repeats appears once. Iterate in a `repeatableRead` transaction to read
     /// one snapshot. The query must not have ordering, a limit, an offset, or `distinct(_:)`.
     public func batches(of size: Int = 500) -> QueryBatches<T> {
         QueryBatches(query: self, size: size)
@@ -54,6 +54,8 @@ public struct QueryBatches<T: Schema>: AsyncSequence, Sendable {
             }
             page.orderFields = [OrderByClause(field: column, direction: .asc)]
             page.limitValue = size
+            // A join can repeat a row, which the keyset would cut between batches: keep one per key.
+            if !page.joins.isEmpty && page.distinctColumns == nil { page.distinctColumns = [column] }
             page.selectedFields?.insert(key.databaseName)
 
             let rows = try await page.all()

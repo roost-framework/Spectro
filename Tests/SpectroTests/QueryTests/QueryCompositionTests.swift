@@ -250,9 +250,36 @@ struct QueryCompositionTests {
         }
     }
 
+    @Test("Distinct grouped aggregates keep their groups' ordering and limit, and composed queries reject locks and partial rows")
+    func distinctGroupsAndComposedChecks() async throws {
+        try await withLibrary { lib in
+            let grouped = lib.posts.distinct().groupBy { $0.compAuthorId }
+            #expect(try await grouped.orderBy { $0.compAuthorId }.limit(1).groupedCount().count == 1)
+            #expect(try await grouped.orderBy(sql: { _ in "count(*)" }).groupedCount().count == 2)
+
+            let locked = lib.posts.lock()
+            await #expect(throws: SpectroError.self) { try await locked.union(lib.posts).all() }
+            await #expect(throws: SpectroError.self) { try await lib.posts.selectFields { $0.title }.union(lib.posts).all() }
+            await #expect(throws: SpectroError.self) { try await lib.posts.lock().recursive { $0.left.id == $0.right.id }.all() }
+
+            var authors: [UUID] = []
+            let joined = lib.repo.query(CompAuthor.self).join(CompPost.self) { $0.left.id == $0.right.compAuthorId }
+            for try await batch in joined.batches(of: 1) { authors += batch.map(\.id) }
+            #expect(authors.count == 2 && Set(authors) == [lib.ana.id, lib.bo.id])
+
+            let edited = try await lib.posts.where { $0.editorId != $0.compAuthorId }.count()
+            let editedReversed = try await lib.posts.where { $0.compAuthorId != $0.editorId }.count()
+            #expect(edited == 2 && editedReversed == 2)
+        }
+    }
+
     @Test("Bulk writes go through distinct rows")
     func distinctWrites() async throws {
         try await withLibrary { lib in
+            let ordered = lib.posts.distinct().orderBy { $0.title }
+            #expect(try await ordered.updateAll { [$0.likes.increment(by: 1)] } == 4)
+            #expect(try await ordered.limit(1).deleteAll() == 1)
+
             let top = lib.posts.distinct { $0.compAuthorId }.orderBy({ $0.views }, .desc)
             let updated = try await top.updateAll { [$0.title.set(sql: "\($0.title) || \("!")")] }
             let titles = try await lib.posts.where { $0.title.endsWith("!") }.orderBy { $0.title }.all().map(\.title)

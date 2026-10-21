@@ -41,17 +41,24 @@ extension Query {
     }
 
     /// The rows the query selects, ignoring limit, offset, and lock as counts do, as the source
-    /// of a query that groups and aggregates them.
-    func distinctRows() -> Query<T> {
+    /// of a query that aggregates them. Only DISTINCT ON needs the ordering, to choose its rows.
+    /// The groups of a grouped query keep its ordering, limit, and offset.
+    func distinctRows(grouped: Bool = false) -> Query<T> {
         var rows = self
         rows.limitValue = nil
         rows.offsetValue = nil
         rows.lockClause = nil
+        if distinctColumns?.isEmpty == true { rows.orderFields = [] }
         var outer = Query(schema: T.self, executor: executor)
         outer.source = QuerySource(sql: rows.selectSQL(), parameters: rows.parameters)
         outer.groupByFields = groupByFields
         outer.havingClause = havingClause
         outer.havingParameters = havingParameters
+        if grouped {
+            outer.orderFields = orderFields
+            outer.limitValue = limitValue
+            outer.offsetValue = offsetValue
+        }
         return outer
     }
 }
@@ -101,7 +108,15 @@ extension Query {
         var result = Query(schema: T.self, executor: executor)
         result.source = QuerySource(sql: sql, parameters: parameters)
         do {
-            for query in queries { try query.validateJoins() }
+            for query in queries {
+                try query.validateJoins()
+                guard query.lockClause == nil else {
+                    throw SpectroError.invalidQuery("PostgreSQL cannot lock the rows of a set operation or a recursive query")
+                }
+                guard query.selectedFields == nil else {
+                    throw SpectroError.invalidQuery("Set operations and recursive queries combine whole rows; remove selectFields")
+                }
+            }
         } catch {
             result.source?.error = error
         }
@@ -277,4 +292,12 @@ public func == <Value: Equatable>(lhs: QueryField<Value?>, rhs: QueryField<Value
 
 public func == <Value: Equatable>(lhs: QueryField<Value>, rhs: QueryField<Value?>) -> QueryCondition {
     QueryCondition(sql: "\(lhs.qualifiedName) = \(rhs.qualifiedName)")
+}
+
+public func != <Value: Equatable>(lhs: QueryField<Value?>, rhs: QueryField<Value>) -> QueryCondition {
+    QueryCondition(sql: "\(lhs.qualifiedName) != \(rhs.qualifiedName)")
+}
+
+public func != <Value: Equatable>(lhs: QueryField<Value>, rhs: QueryField<Value?>) -> QueryCondition {
+    QueryCondition(sql: "\(lhs.qualifiedName) != \(rhs.qualifiedName)")
 }

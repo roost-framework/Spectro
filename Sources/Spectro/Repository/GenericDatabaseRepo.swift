@@ -108,7 +108,7 @@ public actor GenericDatabaseRepo: Repo {
         // Preparations and associations write in one transaction with the record. An invalid
         // changeset throws its validation error without one.
         guard changeset.needsTransaction, changeset.isValid else { return try await operations.insert(changeset) }
-        return try await transaction { tx in try await tx.insert(changeset) }
+        return try await unwrapped { try await self.transaction { tx in try await tx.insert(changeset) } }
     }
 
     /// Update an existing record from a validated changeset.
@@ -123,6 +123,16 @@ public actor GenericDatabaseRepo: Repo {
     /// ```
     public func update<T: Schema>(_ changeset: Changeset<T>) async throws -> T {
         guard changeset.needsTransaction, changeset.isValid else { return try await operations.update(changeset) }
-        return try await transaction { tx in try await tx.update(changeset) }
+        return try await unwrapped { try await self.transaction { tx in try await tx.update(changeset) } }
+    }
+
+    /// Throw the error of a transaction this repository opened itself as the write's own error,
+    /// such as `staleRecord`, as without the transaction.
+    private func unwrapped<T: Sendable>(_ write: () async throws -> T) async throws -> T {
+        do {
+            return try await write()
+        } catch SpectroError.transactionFailed(let underlying) {
+            throw underlying
+        }
     }
 }

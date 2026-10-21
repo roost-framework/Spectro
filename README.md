@@ -412,7 +412,7 @@ for try await batch in repo.query(User.self).batches(of: 1000) {
 }
 ```
 
-`batches(of:)` reads rows in primary key order, one query per batch, like Ecto's `Repo.stream`, so a large table never sits in memory at once. Iterate in a `repeatableRead` transaction to read one snapshot.
+`batches(of:)` reads rows in primary key order, one query per batch, like Ecto's `Repo.stream`, so a large table never sits in memory at once. A row that a join repeats appears once. Iterate in a `repeatableRead` transaction to read one snapshot.
 
 ## Changesets
 
@@ -462,8 +462,9 @@ For a composite constraint, declare the same name on each field that should rece
 `optimisticLock` guards an update against concurrent ones, like Ecto's `optimistic_lock`. The update increments an integer version column and matches the row only while it holds the version that was loaded; otherwise it throws `SpectroError.staleRecord`:
 
 ```swift
-// @Column var lockVersion: Int = 1, stored in a "lock_version" integer column
-let changeset = Changeset.cast(post, params: params, permitted: ["title"]).optimisticLock()
+// @Column var lockVersion: Int = 1, stored in a "lock_version" integer column.
+// Permit "lockVersion" to check the version a form was loaded with, as Ecto does.
+let changeset = Changeset.cast(post, params: params, permitted: ["title", "lockVersion"]).optimisticLock()
 do {
     let updated = try await repo.update(changeset)
 } catch SpectroError.staleRecord {
@@ -710,7 +711,7 @@ let hasAdmins = try await repo.query(User.self).where { $0.isAdmin == true }.exi
 let feed = try await mine.union(pinned).orderBy({ $0.createdAt }, .desc).limit(20).all()
 ```
 
-`distinct { }` sorts by its columns first, as PostgreSQL's `DISTINCT ON` requires and as Ecto does, and counts and aggregates see each remaining row once. `union`, `unionAll`, `intersect`, `intersectAll`, `except`, and `exceptAll` keep each query's own filters, ordering, and limit. A correlated subquery refers to the outer query's fields, as `post.id` does above; a subquery of the same table cannot, because its own columns have the same names. As in SQL, `notIn` matches no row when the subquery selects a NULL.
+`distinct { }` sorts by its columns first, as PostgreSQL's `DISTINCT ON` requires and as Ecto does, and counts and aggregates see each remaining row once. `union`, `unionAll`, `intersect`, `intersectAll`, `except`, and `exceptAll` keep each query's own filters, ordering, and limit. They compare whole rows, so a `json` column, which has no equality, needs `unionAll` (`jsonb` works), and they cannot lock rows. A correlated subquery refers to the outer query's fields, as `post.id` does above; a subquery of the same table cannot, because its own columns have the same names. As in SQL, `notIn` matches no row when the subquery selects a NULL.
 
 ### Recursive queries
 
@@ -1054,7 +1055,7 @@ Select SQL expressions too, such as aggregates of a grouped query or window func
 ```swift
 let totals: [Tuple2<UUID, Int>] = try await repo.query(Post.self)
     .groupBy { $0.authorId }
-    .having { .fragment("count(*) > \(1)") }
+    .having { _ in .fragment("count(*) > \(1)") }
     .select { ($0.authorId, $0.expression("sum(\($0.views))", as: Int.self)) }
     .orderBy(sql: { "sum(\($0.views))" }, .desc)
     .all()

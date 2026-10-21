@@ -128,4 +128,27 @@ extension DatabaseIntegrationTests {
             }
         }
     }
+
+@Suite("SQL migration transaction markers")
+struct SQLMigrationMarkerTests {
+    @Test("transaction:false after either marker, with any line ending, runs the file outside a transaction")
+    func markers() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spectro_markers_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = [
+            "1700000001_up_crlf": "-- migrate:up transaction:false\r\nCREATE INDEX CONCURRENTLY a ON t (x);\r\n-- migrate:down\r\nDROP INDEX a;\r\n",
+            "1700000002_down": "-- migrate:up\nCREATE TABLE t (x INT);\n-- migrate:down transaction:false\nDROP INDEX CONCURRENTLY b;\n",
+            "1700000003_plain": "-- migrate:up\nCREATE TABLE u (x INT);\n-- migrate:down\nDROP TABLE u;\n",
+        ]
+        for (name, text) in files {
+            try text.write(to: directory.appendingPathComponent("\(name).sql"), atomically: true, encoding: .utf8)
+        }
+        let migrations = try MigrationCatalog.load(sources: [.sqlDirectory(directory)])
+        #expect(migrations.map(\.runsInTransaction) == [false, false, true])
+        #expect(migrations[0].upSQL == "CREATE INDEX CONCURRENTLY a ON t (x);")
+        guard case .sql(let down) = migrations[1].rollback else { Issue.record("Expected a rollback"); return }
+        #expect(down == "DROP INDEX CONCURRENTLY b;")
+    }
+}
 }

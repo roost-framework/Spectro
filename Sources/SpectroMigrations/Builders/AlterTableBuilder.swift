@@ -40,7 +40,7 @@ public enum AlterTableBuilder {
 public struct RemovedColumn: Sendable {
     internal let column: ColumnDefinition
 
-    /// The column rejected null values.
+    /// The column rejected null values. Rollback then needs a ``default(_:)`` for existing rows.
     public func notNull() -> Self { .init(column: column.notNull()) }
     /// The column had this default.
     public func `default`(_ value: MigrationDefault) -> Self { .init(column: column.default(value)) }

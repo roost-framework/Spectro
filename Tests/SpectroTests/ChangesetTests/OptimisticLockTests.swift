@@ -50,6 +50,20 @@ struct OptimisticLockTests {
                 _ = try await repo.update(Changeset.cast(custom, params: ["title": "x"], permitted: ["title"]).optimisticLock("title"))
             }
 
+            // A version cast from a stale form wins over the loaded one, as in Ecto.
+            let fresh = try #require(try await repo.reload(doc))
+            let staleForm = Changeset.cast(fresh, params: ["title": "Form", "lockVersion": 1], permitted: ["title", "lockVersion"]).optimisticLock()
+            await #expect(throws: SpectroError.self) { _ = try await repo.update(staleForm) }
+
+            // A write in its own transaction, for a preparation, throws the same error.
+            let prepared = Changeset.cast(doc, params: ["title": "Prepared"], permitted: ["title"])
+                .optimisticLock()
+                .prepareChanges { changeset, _ in changeset }
+            do {
+                _ = try await repo.update(prepared)
+                Issue.record("A stale prepared update succeeded")
+            } catch SpectroError.staleRecord {}
+
             try await repo.delete(LockedDoc.self, id: doc.id)
             do {
                 _ = try await repo.update(Changeset.cast(custom, params: ["title": "Gone"], permitted: ["title"]).optimisticLock())
