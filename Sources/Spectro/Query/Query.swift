@@ -23,21 +23,25 @@ public struct Query<T: Schema>: Sendable {
     internal var parameters: [PostgresData] {
         filterParameters + orderFields.flatMap(\.parameters)
     }
-    /// The bindings of the joins and where alone, for statements without ORDER BY.
+    /// The bindings of the source, joins, and where alone, for statements without ORDER BY.
     internal var filterParameters: [PostgresData] {
-        joins.flatMap(\.parameters) + whereParameters
+        (source?.parameters ?? []) + joins.flatMap(\.parameters) + whereParameters
     }
     internal var orderFields: [OrderByClause] = []
     internal var limitValue: Int?
     internal var offsetValue: Int?
-    private var selectedFields: Set<String>?
+    internal var selectedFields: Set<String>?
     internal var joins: [JoinClause] = []
     internal var referencedTables: Set<JoinTableReference> = []
     internal var groupByFields: [String] = []
     internal var havingClause: String = ""
     internal var havingParameters: [PostgresData] = []
-    private var includeSoftDeleted: Bool = false
+    internal var includeSoftDeleted: Bool = false
     internal var lockClause: String?
+    /// Rows that replace the table in FROM, under its name, such as a union's.
+    internal var source: QuerySource?
+    /// `nil` without DISTINCT, empty for DISTINCT, or the qualified columns of DISTINCT ON.
+    internal var distinctColumns: [String]?
 
     internal init(schema: T.Type, executor: any QueryExecutor) {
         self.schema = schema
@@ -405,6 +409,7 @@ public struct Query<T: Schema>: Sendable {
 
     public func count() async throws -> Int {
         try validateJoins()
+        if distinctColumns != nil { return try await distinctRows().count() }
         let sql = buildCountSQL()
         let results = try await executor.executeQuery(
             sql: sql,
@@ -453,6 +458,7 @@ public struct Query<T: Schema>: Sendable {
 
     private func aggregateExecute(function: String, column: String) async throws -> Double? {
         try validateJoins()
+        if distinctColumns != nil { return try await distinctRows().aggregateExecute(function: function, column: column) }
         let sql = buildAggregateSQL(function: function, column: column)
         let results = try await executor.executeQuery(
             sql: sql,
@@ -488,6 +494,7 @@ public struct Query<T: Schema>: Sendable {
 
     private func groupedAggregateExecute(function: String, column: String) async throws -> [GroupedResult] {
         try validateJoins()
+        if distinctColumns != nil { return try await distinctRows().groupedAggregateExecute(function: function, column: column) }
         guard !groupByFields.isEmpty else {
             throw SpectroError.invalidQuery("grouped\(function.lowercased().capitalized)() requires at least one groupBy() clause")
         }
@@ -527,14 +534,13 @@ public struct Query<T: Schema>: Sendable {
     /// The SELECT with unnumbered `?` placeholders, for embedding in another statement.
     /// Its bindings are `parameters`.
     internal func selectSQL(selectClause: String? = nil) -> String {
-        let table = T.tableName.quoted
         let selection = selectClause ?? buildSelectClause()
         let joinClause = buildJoinClause()
         let orderClause = buildOrderClause()
         let limitClause = buildLimitClause()
         let effectiveWhere = buildWhereClause()
 
-        var sql = "SELECT \(selection) FROM \(table)"
+        var sql = "SELECT \(distinctClause)\(selection) FROM \(fromClause)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
         if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
@@ -546,11 +552,10 @@ public struct Query<T: Schema>: Sendable {
     }
 
     internal func buildCountSQL() -> String {
-        let table = T.tableName.quoted
         let joinClause = buildJoinClause()
         let effectiveWhere = buildWhereClause()
 
-        var sql = "SELECT COUNT(*) as count FROM \(table)"
+        var sql = "SELECT COUNT(*) as count FROM \(fromClause)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
         if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
@@ -559,7 +564,8 @@ public struct Query<T: Schema>: Sendable {
     }
 
     internal func buildWhereClause() -> String {
-        if includeSoftDeleted { return whereClause }
+        // A source's rows were filtered where they were selected.
+        if includeSoftDeleted || source != nil { return whereClause }
         guard let sdf = T.softDeleteColumn else { return whereClause }
         let column = joins.isEmpty ? sdf.quoted : "\(T.tableName.quoted).\(sdf.quoted)"
         let sdFilter = "\(column) IS NULL"
@@ -567,11 +573,10 @@ public struct Query<T: Schema>: Sendable {
     }
 
     private func buildAggregateSQL(function: String, column: String) -> String {
-        let table = T.tableName.quoted
         let joinClause = buildJoinClause()
         let effectiveWhere = buildWhereClause()
 
-        var sql = "SELECT CAST(\(function)(\(qualifiedColumn(column))) AS DOUBLE PRECISION) as agg_result FROM \(table)"
+        var sql = "SELECT CAST(\(function)(\(qualifiedColumn(column))) AS DOUBLE PRECISION) as agg_result FROM \(fromClause)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
         if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
@@ -580,13 +585,12 @@ public struct Query<T: Schema>: Sendable {
     }
 
     private func buildGroupedAggregateSQL(function: String, column: String) -> String {
-        let table = T.tableName.quoted
         let groupColumns = groupByFields.map { qualifiedColumn($0) }.joined(separator: ", ")
         let joinClause = buildJoinClause()
         let effectiveWhere = buildWhereClause()
 
         let colExpr = column == "*" ? "*" : qualifiedColumn(column)
-        var sql = "SELECT \(groupColumns), CAST(\(function)(\(colExpr)) AS DOUBLE PRECISION) as agg_result FROM \(table)"
+        var sql = "SELECT \(groupColumns), CAST(\(function)(\(colExpr)) AS DOUBLE PRECISION) as agg_result FROM \(fromClause)"
 
         if !joinClause.isEmpty { sql += " \(joinClause)" }
         if !effectiveWhere.isEmpty { sql += " WHERE \(effectiveWhere)" }
@@ -599,6 +603,16 @@ public struct Query<T: Schema>: Sendable {
         if !limitClause.isEmpty { sql += limitClause }
 
         return renumberPlaceholders(in: sql)
+    }
+
+    /// The table, or the source rows under the table's name, so qualified columns still resolve.
+    private var fromClause: String {
+        source.map { "(\($0.sql)) AS \(T.tableName.quoted)" } ?? T.tableName.quoted
+    }
+
+    private var distinctClause: String {
+        guard let distinctColumns else { return "" }
+        return distinctColumns.isEmpty ? "DISTINCT " : "DISTINCT ON (\(distinctColumns.joined(separator: ", "))) "
     }
 
     private func buildSelectClause() -> String {
@@ -631,6 +645,7 @@ public struct Query<T: Schema>: Sendable {
     /// Validate identifiers before sending SQL to the server. PostgreSQL silently truncates
     /// identifiers longer than 63 bytes, which can turn distinct aliases into duplicates.
     internal func validateJoins() throws {
+        if let error = source?.error { throw error }
         var tablesByIdentifier = [T.tableName: T.tableName]
         func validate(_ references: Set<JoinTableReference>, available: [String: String]) throws {
             for reference in references.sorted(by: { $0.identifier < $1.identifier }) {
@@ -664,9 +679,12 @@ public struct Query<T: Schema>: Sendable {
     }
 
     internal func buildOrderClause() -> String {
-        guard !orderFields.isEmpty else { return "" }
+        // DISTINCT ON needs its columns first in ORDER BY; prepend those the ordering lacks there, like Ecto.
+        let columns = distinctColumns ?? []
+        let leading = orderFields.prefix { columns.contains($0.field) }.map(\.field)
+        let ordering = columns.filter { !leading.contains($0) }.map { OrderByClause(field: $0, direction: .asc) } + orderFields
         // Fields are pre-quoted at storage time (see orderBy methods above)
-        return orderFields.map { "\($0.field) \($0.direction.sql)" }
+        return ordering.map { "\($0.field) \($0.direction.sql)" }
             .joined(separator: ", ")
     }
 
@@ -766,12 +784,28 @@ public struct TupleQuery<T: Schema, Result: Sendable>: Sendable {
         return result
     }
 
+    /// Remove duplicate results: `SELECT DISTINCT`. `count()` then counts distinct results.
+    public func distinct() -> TupleQuery<T, Result> {
+        TupleQuery<T, Result>(baseQuery: baseQuery.distinct(), selectedFields: selectedFields)
+    }
+
     public func count() async throws -> Int {
-        try await baseQuery.count()
+        guard baseQuery.distinctColumns != nil else { return try await baseQuery.count() }
+        try baseQuery.validateJoins()
+        return try await baseQuery.distinctRows(selectClause: selection).count()
+    }
+
+    /// The projected SELECT with `?` placeholders, to embed in another statement.
+    internal var subquery: QuerySource {
+        QuerySource(sql: baseQuery.selectSQL(selectClause: selection), parameters: baseQuery.parameters)
+    }
+
+    private var selection: String {
+        selectedFields.map { baseQuery.qualifiedColumn($0) }.joined(separator: ", ")
     }
 
     private func buildTupleSQL() -> String {
-        baseQuery.buildSQL(selectClause: selectedFields.map { baseQuery.qualifiedColumn($0) }.joined(separator: ", "))
+        baseQuery.buildSQL(selectClause: selection)
     }
 
     private func mapRowToTuple(_ row: PostgresRow) throws -> Result {

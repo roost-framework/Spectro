@@ -123,10 +123,10 @@ extension Query {
     }
 
     /// The WHERE clause selecting the rows to write, with `?` placeholders.
-    /// Joins and row windows need a primary key subquery; plain filters apply directly.
+    /// Joins, row windows, and composed rows need a primary key subquery; plain filters apply directly.
     private func writeFilter() async throws -> (sql: String, parameters: [PostgresData]) {
         try validateJoins()
-        if joins.isEmpty && limitValue == nil && offsetValue == nil {
+        if joins.isEmpty && limitValue == nil && offsetValue == nil && source == nil && distinctColumns == nil {
             let filter = buildWhereClause()
             return (filter.isEmpty ? "" : " WHERE \(filter)", filterParameters)
         }

@@ -37,7 +37,7 @@ let user = try await client.transaction { tx in
 }
 ```
 
-Transactions use `READ COMMITTED` isolation. The closure receives a ``Repo`` backed by the reserved transaction connection. Use that `tx` for all work that belongs in the transaction, including query builders and changeset writes. Throwing rolls back; successful completion commits.
+Transactions use `READ COMMITTED` isolation unless you pass a ``TransactionIsolation`` to `transaction(isolation:_:)`. Under `repeatableRead` and `serializable`, PostgreSQL may abort a transaction with SQLSTATE `40001`; run it again. The closure receives a ``Repo`` backed by the reserved transaction connection. Use that `tx` for all work that belongs in the transaction, including query builders and changeset writes. Throwing rolls back; successful completion commits.
 
 Calling a separately captured pooled repository inside the closure performs work outside that transaction. Pass `any Repo` to application functions so they can receive either a pooled repository or the transaction's repository.
 

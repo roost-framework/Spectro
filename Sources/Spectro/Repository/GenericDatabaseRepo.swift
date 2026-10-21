@@ -70,9 +70,25 @@ public actor GenericDatabaseRepo: Repo {
     }
 
     public func transaction<T: Sendable>(_ work: @escaping @Sendable (any Repo) async throws -> T) async throws -> T {
-        try await connection.transaction { context in
-            let transactionRepo = TransactionRepo(context: context)
-            return try await work(transactionRepo)
+        try await transaction(isolation: .readCommitted, work)
+    }
+
+    /// Run `work` in a transaction with the given isolation level.
+    ///
+    /// ```swift
+    /// let balance = try await repo.transaction(isolation: .serializable) { tx in
+    ///     // read, check, and write as if no other transaction ran meanwhile
+    /// }
+    /// ```
+    ///
+    /// Under `repeatableRead` and `serializable`, PostgreSQL may abort the transaction with
+    /// SQLSTATE `40001`, read from `SpectroError.serverError`; run it again.
+    public func transaction<T: Sendable>(
+        isolation: TransactionIsolation,
+        _ work: @escaping @Sendable (any Repo) async throws -> T
+    ) async throws -> T {
+        try await connection.transaction(isolation: isolation) { context in
+            try await work(TransactionRepo(context: context))
         }
     }
 

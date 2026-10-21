@@ -55,34 +55,16 @@ struct RepoOperations: Sendable {
         let placeholders = (1...data.count).map { "$\($0)" }.joined(separator: ", ")
         let values = Array(data.values)
 
-        let conflictClause: String
-        switch conflictTarget {
-        case .columns(let cols):
-            let quotedCols = cols.map { $0.snakeCase().quoted }.joined(separator: ", ")
-            conflictClause = "ON CONFLICT (\(quotedCols))"
-        case .constraint(let name):
-            conflictClause = "ON CONFLICT ON CONSTRAINT \(name.quoted)"
+        if set?.isEmpty == true {
+            throw SpectroError.invalidSchema(reason: "upsert 'set' parameter must not be an empty array; use nil to update all columns")
         }
-
         // Without `set`, every inserted column is updated on conflict.
-        let updateColumns: [String]
-        if let set = set {
-            guard !set.isEmpty else {
-                throw SpectroError.invalidSchema(reason: "upsert 'set' parameter must not be an empty array; use nil to update all columns")
-            }
-            updateColumns = set.map { $0.snakeCase() }
-        } else {
-            updateColumns = Array(data.keys)
-        }
-
-        let setClause = updateColumns.map { col in
-            "\(col.quoted) = EXCLUDED.\(col.quoted)"
-        }.joined(separator: ", ")
+        let conflictClause = try ConflictAction.replace(on: conflictTarget, columns: set).sql(insertedColumns: Array(data.keys))
 
         let sql = """
             INSERT INTO \(metadata.tableName.quoted) (\(columns))
             VALUES (\(placeholders))
-            \(conflictClause) DO UPDATE SET \(setClause)
+            \(conflictClause)
             RETURNING *
             """
 
@@ -92,7 +74,8 @@ struct RepoOperations: Sendable {
         return try await T.from(row: row)
     }
 
-    func insertAll<T: Schema>(_ instances: [T], includePrimaryKey: Bool) async throws -> [T] {
+    /// Insert `instances` in batches. With `onConflict`, the records returned are those inserted or updated.
+    func insertAll<T: Schema>(_ instances: [T], includePrimaryKey: Bool, onConflict: ConflictAction? = nil) async throws -> [T] {
         guard !instances.isEmpty else { return [] }
 
         let metadata = await SchemaRegistry.shared.register(T.self)
@@ -105,6 +88,8 @@ struct RepoOperations: Sendable {
         guard columnsPerRow > 0 else {
             throw SpectroError.invalidSchema(reason: "Cannot insert \(T.self) records without columns; insert them one at a time")
         }
+
+        let conflictClause = try onConflict.map { try $0.sql(insertedColumns: columnNames) + "\n" } ?? ""
 
         // Batches stay under PostgreSQL's 65535 parameter limit.
         let batchSize = max(1, min(1000, 65_535 / columnsPerRow))
@@ -133,7 +118,7 @@ struct RepoOperations: Sendable {
             let sql = """
                 INSERT INTO \(metadata.tableName.quoted) (\(columns))
                 VALUES \(valueTuples.joined(separator: ", "))
-                RETURNING *
+                \(conflictClause)RETURNING *
                 """
 
             for row in try await rows(sql, values) {

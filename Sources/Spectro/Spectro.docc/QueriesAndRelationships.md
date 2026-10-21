@@ -33,6 +33,25 @@ let users = try await repo.query(User.self)
 
 ``Query/orderBy(sql:_:)`` sorts by a fragment, in call order with field sorts, and ``Repo/executeRawQuery(_:)`` runs a whole statement written as a fragment.
 
+### Compose queries
+
+```swift
+let latest = try await repo.query(Post.self).distinct { $0.authorId }.orderBy({ $0.createdAt }, .desc).all()
+let commented = try await repo.query(Post.self)
+    .where { post in .exists(repo.query(Comment.self).where { $0.postId == post.id }) }
+    .all()
+let authors = try await repo.query(User.self)
+    .where { $0.id.in(repo.query(Post.self).select { $0.authorId }) }
+    .all()
+let feed = try await mine.union(pinned).orderBy({ $0.createdAt }, .desc).limit(20).all()
+let subtree = try await repo.query(Category.self)
+    .where { $0.id == rootID }
+    .recursive { $0.left.parentId == $0.right.id }
+    .all()
+```
+
+``Query/distinct()`` and ``Query/distinct(_:)`` remove duplicate rows or keep the first row per value. ``QueryCondition/exists(_:)`` and `in(_:)` take subqueries, which may refer to the outer query's fields. Fields also compare with each other, as in `$0.likes > $0.views`. ``Query/union(_:)`` and the other set operations combine queries that keep their own clauses, and ``Query/recursive(_:)`` follows rows like a recursive CTE. ``Query/exists()`` tests for any matching row, and ``Query/batches(of:)`` reads a large result in primary key batches.
+
 ### Update, delete, and lock many rows
 
 ```swift

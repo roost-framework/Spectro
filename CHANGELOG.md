@@ -4,6 +4,15 @@
 
 - Add `orderBy(sql:_:)` to `Query` and `TupleQuery`, to sort by an `SQLFragment`. Fragment and field sorts keep call order, and the fragment's parameters bind after the filters'. `count()`, aggregates, and direct bulk writes drop the ordering with its parameters.
 - Add `Repo.executeRawQuery(_:)`, like Ecto's `Repo.query`, to run a statement written as an `SQLFragment`, with its placeholders numbered.
+- Add `Query.distinct()` and `Query.distinct(_:)` for `DISTINCT` and `DISTINCT ON`, and `TupleQuery.distinct()`. DISTINCT ON columns the ordering does not start with are sorted first, as Ecto does. `count()` and aggregates count each distinct row once.
+- Add subqueries: `in(_:)` and `notIn(_:)` take a single-column `TupleQuery`, and `QueryCondition.exists(_:)` takes a `Query`, correlated through the outer query's fields. Add `Query.exists()`, like Ecto's `Repo.exists?`.
+- Compare columns with columns: `==`, `!=`, `<`, `<=`, `>`, and `>=` between `QueryField`s, including nullable with nonnullable.
+- Add `union`, `unionAll`, `intersect`, `intersectAll`, `except`, and `exceptAll`. Each query keeps its filters, joins, ordering, and limit; clauses added to the result apply to the combined rows.
+- Add `Query.recursive(_:)`, a `WITH RECURSIVE` query that follows rows from the query's rows, such as a tree's descendants or ancestors. It skips soft-deleted rows and ends on cycles.
+- Add `transaction(isolation:_:)` to `GenericDatabaseRepo`, `Spectro`, and `DatabaseConnection`, with `TransactionIsolation` levels `readCommitted`, `repeatableRead`, and `serializable`.
+- Add `insertAll(_:onConflict:includePrimaryKey:)` and `insert(_:onConflict:includePrimaryKey:)` with `ConflictAction.nothing(on:)` and `.replace(on:columns:)`, like Ecto's `on_conflict`. They return the records inserted or updated.
+- Add `Repo.reload(_:)` for one record or many, in one query, like Ecto's `Repo.reload`.
+- Add `Query.batches(of:)`, an `AsyncSequence` of primary key batches for reading large results, like Ecto's `Repo.stream`.
 - Add `DatabaseValue`, Spectro's counterpart of `Ecto.Type`. `@Column`, filters, changesets, selections, and updates accept any conforming type. Built in: `Decimal` (`numeric`), `Data` (`bytea`), arrays of conforming types (`text[]`, `uuid[]`, `integer[]`, …), `[String: Value]` dictionaries (`jsonb`), and `Optional`s of all of them. Conform a raw-value enum to store its raw value; a `String` raw value fits text, varchar, and PostgreSQL enum columns. Conform a `Codable` type to `JSONBValue` to store it as `jsonb`. Implement `toPostgresData()`, `fromPostgresData(_:)`, and optionally `cast(_:)` for other types. `PrimaryKeyType` now refines `DatabaseValue`; existing conformances keep compiling.
 - `@Column` requires a `DatabaseValue` type. Properties of other types compiled but were silently neither stored nor decoded; conform the type, or store it in a plain property.
 - Add `FieldType.custom` and `FieldInfo.valueType`. Add `custom` to exhaustive switches over `FieldType`.
