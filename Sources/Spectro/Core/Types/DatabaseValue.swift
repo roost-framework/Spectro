@@ -265,12 +265,13 @@ extension DatabaseValue where Self: RawRepresentable, RawValue: DatabaseValue {
 /// }
 /// ```
 ///
-/// Values are encoded with a default `JSONEncoder`. Changesets accept the type itself or
-/// a JSON object such as a decoded request body.
+/// Values are encoded with a `JSONEncoder` that writes dates as ISO 8601 strings with
+/// milliseconds, as Ecto does. Changesets accept the type itself or a JSON object such as a
+/// decoded request body.
 public protocol JSONBValue: DatabaseValue, Codable {}
 
 extension JSONBValue {
-    public func toPostgresData() throws -> PostgresData { try PostgresData(jsonb: self) }
+    public func toPostgresData() throws -> PostgresData { PostgresData(jsonb: try jsonEncoder().encode(self)) }
     public static func fromPostgresData(_ data: PostgresData) -> Self? { decodeJSON(data) }
     public static func cast(_ value: any Sendable) -> Self? { castJSON(value) }
     public static var postgresType: PostgresDataType { .jsonb }
@@ -278,10 +279,32 @@ extension JSONBValue {
 
 /// Stored as `jsonb`, like an Ecto `:map`.
 extension Dictionary: DatabaseValue where Key == String, Value: DatabaseValue & Codable {
-    public func toPostgresData() throws -> PostgresData { try PostgresData(jsonb: self) }
+    public func toPostgresData() throws -> PostgresData { PostgresData(jsonb: try jsonEncoder().encode(self)) }
     public static func fromPostgresData(_ data: PostgresData) -> Self? { decodeJSON(data) }
     public static func cast(_ value: any Sendable) -> Self? { castJSON(value) }
     public static var postgresType: PostgresDataType { .jsonb }
+}
+
+/// Dates in jsonb are ISO 8601 strings, readable in SQL and by other applications.
+private func jsonEncoder() -> JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .custom { date, encoder in
+        var container = encoder.singleValueContainer()
+        try container.encode(date.formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true)))
+    }
+    return encoder
+}
+
+private func jsonDecoder() -> JSONDecoder {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .custom { decoder in
+        let container = try decoder.singleValueContainer()
+        guard let date = Date.cast(try container.decode(String.self)) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Expected an ISO 8601 date")
+        }
+        return date
+    }
+    return decoder
 }
 
 private func decodeJSON<T: Decodable>(_ data: PostgresData) -> T? {
@@ -292,7 +315,7 @@ private func decodeJSON<T: Decodable>(_ data: PostgresData) -> T? {
     case .text, .varchar: data.string.map { Data($0.utf8) }
     default: nil
     }
-    return json.flatMap { try? JSONDecoder().decode(T.self, from: $0) }
+    return json.flatMap { try? jsonDecoder().decode(T.self, from: $0) }
 }
 
 private func castJSON<T: Decodable>(_ value: any Sendable) -> T? {
@@ -305,7 +328,7 @@ private func castJSON<T: Decodable>(_ value: any Sendable) -> T? {
     } else {
         json = nil
     }
-    return json.flatMap { try? JSONDecoder().decode(T.self, from: $0) }
+    return json.flatMap { try? jsonDecoder().decode(T.self, from: $0) }
 }
 
 // MARK: - Arrays

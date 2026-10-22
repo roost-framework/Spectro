@@ -39,6 +39,11 @@ struct EmbedProfile {
 }
 
 @EmbeddedSchema
+struct EmbedVisit {
+    @Column var at: Date
+}
+
+@EmbeddedSchema
 struct EmbedTag: JSONBValue {
     @Column var label: String
 }
@@ -104,6 +109,12 @@ struct ChangesetEmbedTests {
         #expect(EmbedTag.fromPostgresData(try EmbedTag(label: "a").toPostgresData())?.label == "a")
         #expect(EmbedOuter.Row.tableName == "embed_outer_rows")
         #expect(try JSONSerialization.jsonObject(with: JSONEncoder().encode(EmbedOuter.Row(name: "a"))) is [String: Any])
+
+        let at = Date(timeIntervalSince1970: 0.25)
+        let stored = try EmbedVisit(at: at).toPostgresData()
+        #expect(stored.jsonb.map { String(decoding: $0, as: UTF8.self) } == #"{"at":"1970-01-01T00:00:00.250Z"}"#)
+        #expect(EmbedVisit.fromPostgresData(stored)?.at == at)
+        #expect([String: Date].cast(["at": "1970-01-01T00:00:00Z"] as [String: any Sendable]) == ["at": Date(timeIntervalSince1970: 0)])
     }
 
     @Test("castEmbed reads the field's params, updates the record's value, and joins its errors")

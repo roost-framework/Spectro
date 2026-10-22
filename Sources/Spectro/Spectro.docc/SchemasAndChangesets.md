@@ -44,7 +44,7 @@ struct Listing {
 }
 ```
 
-``Column`` stores any ``DatabaseValue``, Spectro's counterpart of `Ecto.Type`: the scalar types above, `Decimal` as `numeric`, `Data` as `bytea`, arrays as PostgreSQL arrays, `[String: Value]` dictionaries and ``JSONBValue`` types as `jsonb`, raw-value enums as their raw value, and `Optional` of any of them as a nullable column. A `String` raw value fits text, varchar, and PostgreSQL enum columns. Changesets cast input to these types, such as `"12.50"` to a `Decimal` or a JSON object to an `Address`. Conform another type by implementing `toPostgresData()` and `fromPostgresData(_:)`.
+``Column`` stores any ``DatabaseValue``, Spectro's counterpart of `Ecto.Type`: the scalar types above, `Decimal` as `numeric`, `Data` as `bytea`, arrays as PostgreSQL arrays, `[String: Value]` dictionaries and ``JSONBValue`` types as `jsonb`, raw-value enums as their raw value, and `Optional` of any of them as a nullable column. A `String` raw value fits text, varchar, and PostgreSQL enum columns. Changesets cast input to these types, such as `"12.50"` to a `Decimal` or a JSON object to an `Address`. Dates in `jsonb` values are stored as ISO 8601 strings with milliseconds, as Ecto does. Conform another type by implementing `toPostgresData()` and `fromPostgresData(_:)`.
 
 ### Cast permitted input
 

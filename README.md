@@ -278,7 +278,7 @@ struct Listing {
 }
 ```
 
-Give enum and `JSONBValue` properties a default value, as above, since they have no `init()`. A value a property cannot represent, such as an enum label it lacks, fails decoding with `SpectroError.resultDecodingFailed`. `Decimal` holds 38 significant digits and cannot store NaN. Raw-value enums are stored as their raw value; arrays of them need a `text[]` column rather than an array of a PostgreSQL enum type. Changesets cast request input to these types: `"12.50"` to a `Decimal`, `"published"` to a `Status`, and a JSON object to an `Address`.
+Give enum and `JSONBValue` properties a default value, as above, since they have no `init()`. A value a property cannot represent, such as an enum label it lacks, fails decoding with `SpectroError.resultDecodingFailed`. `Decimal` holds 38 significant digits and cannot store NaN. Raw-value enums are stored as their raw value; arrays of them need a `text[]` column rather than an array of a PostgreSQL enum type. Changesets cast request input to these types: `"12.50"` to a `Decimal`, `"published"` to a `Status`, and a JSON object to an `Address`. Dates in `jsonb` values are stored as ISO 8601 strings with milliseconds, as Ecto does, so SQL and other applications can read them.
 
 Conform other types by implementing `toPostgresData()` and `fromPostgresData(_:)`, and optionally `cast(_:)` for changesets and `postgresType` for arrays:
 
