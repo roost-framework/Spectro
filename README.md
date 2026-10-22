@@ -48,6 +48,7 @@ Browse guides and searchable API reference in the [documentation for the latest 
 - **Test sandbox** -- run tests in a transaction that is always rolled back, like Ecto's SQL sandbox
 - **Transaction support** -- `READ COMMITTED`, `REPEATABLE READ`, or `SERIALIZABLE` isolation with automatic rollback; full CRUD and query builder available inside transactions via `QueryExecutor`
 - **Changesets** -- permitted-field casting, validation, serializable errors, and insert/update inside transactions
+- **Embedded schemas** -- `@EmbeddedSchema` values stored as `jsonb`, cast and validated with `castEmbed`, like Ecto's `embedded_schema`
 - **Pagination and soft deletes** -- counted pages and opt-in deleted-record filtering
 - **Actor-based connection pooling** -- built on SwiftNIO and PostgresKit
 - **Plain SQL migrations** -- timestamped `.sql` files with `-- migrate:up` / `-- migrate:down` markers
@@ -516,6 +517,63 @@ let post = try await repo.update(
     let count = try await tx.query(Post.self).where { $0.userId == user.id }.count()
     return changeset.putChange("postCount", value: count)
 }
+```
+
+### Embedded schemas
+
+`@EmbeddedSchema` declares a schema without a table, like Ecto's `embedded_schema`. Store one value in a `jsonb` column of another schema, and a list in a `jsonb[]` column, Ecto's `{:array, :map}`:
+
+```swift
+@EmbeddedSchema
+struct Address {
+    @Column var street: String
+    @Column var city: String
+}
+
+@EmbeddedSchema
+struct Phone {
+    @ID var id: UUID
+    @Column var number: String
+}
+
+@Schema("users")
+struct User {
+    @ID var id: UUID
+    @Column var name: String
+    @Column var address: Address?      // jsonb
+    @Column var phones: [Phone] = []   // jsonb[]
+}
+```
+
+`castEmbed` casts the nested params of a field, from the params given to `cast`, into an embedded value or list, like Ecto's `cast_embed`. The values become changes of the field, written with the record in the same statement, and their errors join the record's as `"address.city"` or `"phones[1].number"`:
+
+```swift
+// params: ["name": "Ana", "address": ["city": "Oslo"], "phones": [["number": "555"]]]
+let changeset = Changeset<User>.cast(user, params: params, permitted: ["name"])
+    .castEmbed(\.address) { address, params in
+        Changeset.cast(address, params: params, permitted: ["street", "city"]).validateRequired(["city"])
+    }
+    .castEmbed(\.phones) { phone, params in
+        Changeset.cast(phone, params: params, permitted: ["number"]).validateRequired(["number"])
+    }
+```
+
+Without params for the field, as in a partial update, its value stays as it is, and `null` removes it. Params update the record's value. In a list, params carrying the primary key of a value update it, others add a value with a fresh key, and the values they leave out are removed. Leave embedded fields out of `cast`'s permitted fields, which accept only values of the embedded type. `putEmbed` sets values or changesets, like Ecto's `put_embed`.
+
+An embedded schema needs no `@ID`, and its properties' types must be `Codable`. Properties are stored under their column names, such as `postal_code` or the name given to `@Column`, with `nil` as null, and a key missing from stored data keeps the property's default, so adding a property needs no data migration. A list needs a `jsonb[]` column, not a `jsonb` column holding a JSON array.
+
+On its own, an embedded schema validates input without a table, such as a search form. `applyToInstance()` returns the values of a valid changeset, like Ecto's `apply_action`:
+
+```swift
+@EmbeddedSchema
+struct Search {
+    @Column var query: String
+    @Column var page: Int = 1
+}
+
+let search = try Changeset<Search>.cast(nil, params: params, permitted: ["query", "page"])
+    .validateRequired(["query"])
+    .applyToInstance()
 ```
 
 ## Query Builder

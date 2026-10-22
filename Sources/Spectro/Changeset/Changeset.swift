@@ -40,6 +40,9 @@ public struct Changeset<T: Schema>: Sendable {
     /// Pending changes that passed casting (field name → value).
     public private(set) var changes: [String: any Sendable]
 
+    /// The params given to `cast`, from which `castEmbed` reads nested params.
+    public private(set) var params: [String: any Sendable] = [:]
+
     /// Accumulated validation errors (field name → error messages).
     public internal(set) var errors: [String: [String]]
 
@@ -118,13 +121,15 @@ public struct Changeset<T: Schema>: Sendable {
 
         let action: Action? = data == nil ? .insert : .update
 
-        return Changeset(
+        var changeset = Changeset(
             data: data,
             changes: changes,
             errors: errors,
             permitted: permittedSet,
             action: action
         )
+        changeset.params = params
+        return changeset
     }
 
     // MARK: - Field Access
@@ -460,8 +465,9 @@ public struct Changeset<T: Schema>: Sendable {
         return changes
     }
 
-    /// Apply changes to an existing or new instance using `MutableSchema`.
-    /// For insert changesets (data == nil), creates a fresh `T()` and applies changes.
+    /// The record with the changes applied, such as a form's validated values, like Ecto's
+    /// `apply_action`. For insert changesets (data == nil), the changes apply to a fresh `T()`.
+    /// Relationships are not kept.
     ///
     /// Throws `SpectroError.validationError` if the changeset is invalid.
     public func applyToInstance() throws -> T {
@@ -474,22 +480,17 @@ public struct Changeset<T: Schema>: Sendable {
                 errors: allErrors
             )
         }
+        return try applied()
+    }
 
-        let instance = data ?? T()
-        if var mutable = instance as? MutableSchema {
-            var anyChanges: [String: Any] = [:]
-            for (key, value) in changes {
-                anyChanges[key] = value
-            }
-            mutable.apply(values: anyChanges)
-            if let result = mutable as? T {
-                return result
-            }
+    /// The record with the changes applied, valid or not.
+    func applied() throws -> T {
+        let base = data ?? T()
+        var values: [String: Any] = [:]
+        for field in SchemaRegistry.extractMetadata(from: T.self).fields {
+            values[field.name] = changes[field.name] ?? extractFieldValue(from: base, named: field.name)
         }
-
-        // For non-MutableSchema types, return instance as-is.
-        // Changes will be applied at the SQL level via the changes dict.
-        return instance
+        return try T.buildInstance(from: values)
     }
 
     // MARK: - Private Helpers

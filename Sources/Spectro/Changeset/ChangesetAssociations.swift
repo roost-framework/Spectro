@@ -252,6 +252,133 @@ extension Changeset {
         errors = errors.filter { key, _ in key != name && !key.hasPrefix("\(name)[") && !key.hasPrefix("\(name).") }
     }
 
+    // MARK: - Embeds
+
+    /// Cast the field's nested params, from the params given to `cast`, into an embedded schema,
+    /// like Ecto's `cast_embed`.
+    ///
+    /// ```swift
+    /// let changeset = Changeset<User>.cast(user, params: params, permitted: ["name"])
+    ///     .castEmbed(\.address) { address, params in
+    ///         Changeset.cast(address, params: params, permitted: ["street", "city"]).validateRequired(["city"])
+    ///     }
+    /// ```
+    ///
+    /// Without params for the field, its value stays as it is; `nil` or `NSNull` removes it.
+    /// Params update the record's value, unless they carry another primary key, which makes a new
+    /// value. The value becomes a change of the field, written with the record, and its errors
+    /// join this changeset's as `"address.city"`. Params that are not a dictionary are invalid.
+    /// `cast` itself accepts only values of the embedded type for the field.
+    public func castEmbed<Embedded: Schema & DatabaseValue>(
+        _ keyPath: KeyPath<T, Embedded?>,
+        with changeset: (Embedded?, [String: any Sendable]) -> Changeset<Embedded>
+    ) -> Changeset<T> {
+        let name = Self.fieldName(keyPath)
+        guard let value = params[name] else { return self }
+        if isNilAny(value) || value is NSNull { return putEmbed(keyPath, nil as Embedded?) }
+        guard let params = value as? [String: any Sendable] else { return invalidEmbed(name) }
+        return putEmbed(keyPath, embedChangeset(data?[keyPath: keyPath] ?? nil, params, changeset))
+    }
+
+    /// `castEmbed(_:with:)` for a field that always holds a value.
+    public func castEmbed<Embedded: Schema & DatabaseValue>(
+        _ keyPath: KeyPath<T, Embedded>,
+        with changeset: (Embedded?, [String: any Sendable]) -> Changeset<Embedded>
+    ) -> Changeset<T> {
+        let name = Self.fieldName(keyPath)
+        guard let value = params[name] else { return self }
+        guard let params = value as? [String: any Sendable] else { return invalidEmbed(name) }
+        return putEmbed(keyPath, embedChangeset(data?[keyPath: keyPath], params, changeset))
+    }
+
+    /// Cast the field's list of nested params into a list of embedded schemas, like Ecto's
+    /// `cast_embed` for `embeds_many`. Params carrying the primary key of one of the record's
+    /// values update it, others make new values, and the values they leave out are removed.
+    /// Errors join this changeset's as `"phones[1].number"`.
+    public func castEmbed<Embedded: Schema & DatabaseValue>(
+        _ keyPath: KeyPath<T, [Embedded]>,
+        with changeset: (Embedded?, [String: any Sendable]) -> Changeset<Embedded>
+    ) -> Changeset<T> {
+        let name = Self.fieldName(keyPath)
+        guard let value = params[name] else { return self }
+        guard let list = value as? [[String: any Sendable]] else { return invalidEmbed(name) }
+        let key = SchemaRegistry.extractMetadata(from: Embedded.self).primaryKeyField
+        var unmatched: [AnyHashable: Embedded] = [:]
+        for value in data?[keyPath: keyPath] ?? [] {
+            if let valueKey = recordKey(value)?.key { unmatched[valueKey] = value }
+        }
+        return putEmbed(keyPath, list.map { params in
+            changeset(paramsKey(params, field: key, type: Embedded.self).flatMap { unmatched.removeValue(forKey: $0) }, params)
+        })
+    }
+
+    /// Set an embedded schema, like Ecto's `put_embed`; `nil` removes it.
+    public func putEmbed<Embedded: Schema & DatabaseValue>(_ keyPath: KeyPath<T, Embedded?>, _ value: Embedded?) -> Changeset<T> {
+        putEmbed(keyPath, value.map { Changeset<Embedded>(data: $0, action: .update) })
+    }
+
+    /// `putEmbed(_:_:)` with a changeset, whose errors join this changeset's as `"address.city"`.
+    @_disfavoredOverload
+    public func putEmbed<Embedded: Schema & DatabaseValue>(_ keyPath: KeyPath<T, Embedded?>, _ changeset: Changeset<Embedded>?) -> Changeset<T> {
+        embed(Self.fieldName(keyPath), changeset.map { [$0] } ?? []) { $0.first }
+    }
+
+    /// `putEmbed(_:_:)` for a field that always holds a value.
+    public func putEmbed<Embedded: Schema & DatabaseValue>(_ keyPath: KeyPath<T, Embedded>, _ value: Embedded) -> Changeset<T> {
+        putEmbed(keyPath, Changeset<Embedded>(data: value, action: .update))
+    }
+
+    /// `putEmbed(_:_:)` with a changeset, for a field that always holds a value.
+    @_disfavoredOverload
+    public func putEmbed<Embedded: Schema & DatabaseValue>(_ keyPath: KeyPath<T, Embedded>, _ changeset: Changeset<Embedded>) -> Changeset<T> {
+        embed(Self.fieldName(keyPath), [changeset]) { $0[0] }
+    }
+
+    /// Set a list of embedded schemas, like Ecto's `put_embed` for `embeds_many`.
+    public func putEmbed<Embedded: Schema & DatabaseValue>(_ keyPath: KeyPath<T, [Embedded]>, _ values: [Embedded]) -> Changeset<T> {
+        putEmbed(keyPath, values.map { Changeset<Embedded>(data: $0, action: .update) })
+    }
+
+    /// `putEmbed(_:_:)` with changesets, whose errors join this changeset's as `"phones[1].number"`.
+    @_disfavoredOverload
+    public func putEmbed<Embedded: Schema & DatabaseValue>(_ keyPath: KeyPath<T, [Embedded]>, _ changesets: [Changeset<Embedded>]) -> Changeset<T> {
+        embed(Self.fieldName(keyPath), changesets, many: true) { $0 }
+    }
+
+    /// The changeset of an embedded value for `params`: of `current`, unless they carry another key.
+    private func embedChangeset<Embedded: Schema>(
+        _ current: Embedded?, _ params: [String: any Sendable],
+        _ changeset: (Embedded?, [String: any Sendable]) -> Changeset<Embedded>
+    ) -> Changeset<Embedded> {
+        let key = paramsKey(params, field: SchemaRegistry.extractMetadata(from: Embedded.self).primaryKeyField, type: Embedded.self)
+        return changeset(key == nil || key == current.flatMap(recordKey)?.key ? current : nil, params)
+    }
+
+    /// Make the values of `changesets`, put together by `value`, the change of the field `name`,
+    /// replacing an earlier cast or put of it. Errors join as `"name.field"`, or as
+    /// `"name[1].field"` for `many`.
+    private func embed<Embedded: Schema, Value: Sendable>(
+        _ name: String, _ changesets: [Changeset<Embedded>], many: Bool = false, as value: ([Embedded]) -> Value
+    ) -> Changeset<T> {
+        var copy = self
+        copy.replaceAssociation(name)
+        for (index, child) in changesets.enumerated() {
+            for (field, messages) in child.errors {
+                copy.errors["\(many ? "\(name)[\(index)]" : name).\(field)", default: []].append(contentsOf: messages)
+            }
+        }
+        let values = changesets.compactMap { try? $0.applied() }
+        guard values.count == changesets.count else { return copy.deleteChange(name).addError(name, message: "is invalid") }
+        return copy.putChange(name, value: value(values))
+    }
+
+    /// Replace an earlier cast or put of the embed `name` with an "is invalid" error.
+    private func invalidEmbed(_ name: String) -> Changeset<T> {
+        var copy = deleteChange(name)
+        copy.replaceAssociation(name)
+        return copy.addError(name, message: "is invalid")
+    }
+
     // MARK: - Preparing Changes
 
     /// Run `prepare` just before the insert or update, in its transaction, like Ecto's
@@ -331,14 +458,14 @@ struct Junction: Sendable {
         let matches = "\(parentColumn.quoted) = $1 AND \(relatedColumn.quoted) = $2"
         _ = try await repo.executeRawQuery(
             sql: "INSERT INTO \(table.quoted) (\(parentColumn.quoted), \(relatedColumn.quoted)) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM \(table.quoted) WHERE \(matches))",
-            parameters: [try parent.toPostgresData(), try related.toPostgresData()]
+            parameters: [parent.toPostgresData(), related.toPostgresData()]
         )
     }
 
     func unlink(_ parent: any PrimaryKeyType, _ related: any PrimaryKeyType, using repo: any Repo) async throws {
         _ = try await repo.executeRawQuery(
             sql: "DELETE FROM \(table.quoted) WHERE \(parentColumn.quoted) = $1 AND \(relatedColumn.quoted) = $2",
-            parameters: [try parent.toPostgresData(), try related.toPostgresData()]
+            parameters: [parent.toPostgresData(), related.toPostgresData()]
         )
     }
 }

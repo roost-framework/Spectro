@@ -33,6 +33,7 @@ Spectro 2.1 also offers the optional `SpectroMigrations` product for compiled Sw
 
 - ``Schema(_:)``
 - ``Schema(_:encodable:)``
+- ``EmbeddedSchema()``
 - ``Schema``
 - ``SchemaBuilder``
 - ``ID``

@@ -111,6 +111,22 @@ Pass the existing record as `data` for updates and `nil` for inserts. Both ``Gen
 
 `castAssoc(_:params:foreignKey:onReplace:with:)` casts nested params into a has-many, has-one, or many-to-many relationship, written with the record in one transaction, and `putAssoc(_:_:foreignKey:onReplace:)` sets a relationship to stored records or to changesets, like Ecto's `put_assoc`. ``Changeset/prepareChanges(_:)`` runs a function in the write's transaction just before it.
 
+``EmbeddedSchema()`` declares a schema without a table, like Ecto's `embedded_schema`, stored as `jsonb` in a column of another schema, or as `jsonb[]` for a list:
+
+```swift
+@EmbeddedSchema
+struct Address {
+    @Column var city: String
+}
+
+let changeset = Changeset.cast(user, params: ["address": ["city": "Oslo"]], permitted: [])
+    .castEmbed(\.address) { address, params in
+        Changeset.cast(address, params: params, permitted: ["city"]).validateRequired(["city"])
+    }
+```
+
+`castEmbed(_:with:)` casts a field's nested params, from those given to `cast`, into an embedded value or list, like Ecto's `cast_embed`; without params for the field, its value stays as it is. `putEmbed(_:_:)` sets values or changesets, like Ecto's `put_embed`. The values are changes of the field, written with the record, and their errors join the record's as `"address.city"` or `"phones[1].number"`. On its own, an embedded schema validates input without a table, such as a form, and ``Changeset/applyToInstance()`` returns the values of a valid changeset.
+
 Every field name also has a key path form, such as `Changeset.cast(nil, params: params, permitting: \.name, \.email)`, `.validateRequired(\.name)`, `.validateInclusion(\.role, in: [.member])`, and `.putChange(\.isActive, true)`, so a renamed property fails to compile and values have the field's type.
 
 `optimisticLock(_:)` guards an update against concurrent ones: it increments an integer version field, `lockVersion` by default, and throws `SpectroError.staleRecord` when the row no longer holds the loaded version.

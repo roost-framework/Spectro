@@ -50,3 +50,32 @@ public macro Schema(_ tableName: String) = #externalMacro(module: "SpectroMacros
 @attached(member, names: named(tableName), named(softDeleteColumn), named(init), named(_keyPathToColumn))
 @attached(extension, conformances: Schema, SchemaBuilder, Encodable, names: named(build), named(CodingKeys), named(encode))
 public macro Schema(_ tableName: String, encodable: Bool) = #externalMacro(module: "SpectroMacros", type: "SchemaMacro")
+
+/// Generates a schema without a table, stored as `jsonb` in a column of another schema, like
+/// Ecto's `embedded_schema`.
+///
+/// ```swift
+/// @EmbeddedSchema
+/// struct Address {
+///     @Column var street: String
+///     @Column var city: String
+/// }
+///
+/// @Schema("users")
+/// struct User {
+///     @ID var id: UUID
+///     @Column var address: Address?       // a jsonb column
+///     @Column var phones: [Phone] = []     // a jsonb[] column, Ecto's {:array, :map}
+/// }
+/// ```
+///
+/// The struct conforms to `Schema` and `JSONBValue`: changesets cast and validate it, alone, as
+/// for a form, or through `Changeset.castEmbed` in its parent's. An `@ID` is optional; with one,
+/// new values get a fresh key and `castEmbed` matches params to values by it. Properties, which
+/// must be `Codable`, are stored under their column names, such as `postal_code`, with `nil` as
+/// null; a missing key keeps the property's default, so adding a property needs no data
+/// migration. `cast` accepts only values of the struct, not params. The struct has no table to
+/// query.
+@attached(member, names: named(tableName), named(softDeleteColumn), named(init), named(_keyPathToColumn))
+@attached(extension, conformances: Schema, SchemaBuilder, JSONBValue, names: named(build), named(CodingKeys), named(encode), named(init), named(cast))
+public macro EmbeddedSchema() = #externalMacro(module: "SpectroMacros", type: "SchemaMacro")

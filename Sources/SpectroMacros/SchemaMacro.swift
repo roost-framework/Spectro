@@ -163,6 +163,11 @@ private func extractTableName(from node: AttributeSyntax) -> String? {
     return segment.content.text
 }
 
+/// Whether the attribute is `@EmbeddedSchema`, a schema without a table that is stored as `jsonb`.
+private func isEmbedded(_ node: AttributeSyntax) -> Bool {
+    node.attributeName.trimmedDescription.hasSuffix("EmbeddedSchema")
+}
+
 /// Extract the `encodable:` parameter from `@Schema("table", encodable: false)`.
 /// Defaults to `true` when the parameter is absent.
 private func extractEncodableFlag(from node: AttributeSyntax) -> Bool {
@@ -243,14 +248,15 @@ extension SchemaMacro: MemberMacro {
             return []
         }
 
-        guard let tableName = extractTableName(from: node) else {
+        let embedded = isEmbedded(node)
+        guard let tableName = embedded ? "" : extractTableName(from: node) else {
             context.diagnose(Diagnostic(node: node, message: SchemaDiagnostic.missingTableName))
             return []
         }
 
         let properties = collectProperties(from: structDecl)
 
-        guard properties.contains(where: { $0.wrapper == .id }) else {
+        guard embedded || properties.contains(where: { $0.wrapper == .id }) else {
             context.diagnose(Diagnostic(node: node, message: SchemaDiagnostic.missingID))
             return []
         }
@@ -434,11 +440,19 @@ extension SchemaMacro: ExtensionMacro {
         }
 
         let body = assignments.joined(separator: "\n            ")
+        // The full name of a nested type, and only the conformances it lacks, which the
+        // compiler passes: declaring one again would be redundant.
+        let extendedType = type.trimmedDescription
+        let missing = Set(protocols.map(\.trimmedDescription))
+        func conformances(_ names: String...) -> String {
+            let lacking = names.filter(missing.contains)
+            return lacking.isEmpty ? "" : ": " + lacking.joined(separator: ", ")
+        }
 
         let schemaExt: DeclSyntax = """
-        extension \(raw: typeName): Schema, SchemaBuilder {
-            public static func build(from values: [String: Any]) -> \(raw: typeName) {
-                var instance = \(raw: typeName)()
+        extension \(raw: extendedType)\(raw: conformances("Schema", "SchemaBuilder")) {
+            public static func build(from values: [String: Any]) -> Self {
+                var instance = Self()
                 \(raw: body)
                 return instance
             }
@@ -451,9 +465,11 @@ extension SchemaMacro: ExtensionMacro {
 
         // --- Encodable extension ---
 
-        let encodable = extractEncodableFlag(from: node)
-        if encodable {
-            let encodableExt = generateEncodableExtension(typeName: typeName, properties: allProps)
+        let embedded = isEmbedded(node)
+        if embedded || extractEncodableFlag(from: node) {
+            let encodableExt = generateEncodableExtension(
+                header: extendedType + conformances(embedded ? "JSONBValue" : "Encodable"),
+                properties: allProps, decodable: embedded)
             if let extDecl = encodableExt.as(ExtensionDeclSyntax.self) {
                 extensions.append(extDecl)
             }
@@ -465,14 +481,17 @@ extension SchemaMacro: ExtensionMacro {
 
 // MARK: - Encodable Generation
 
-private func generateEncodableExtension(typeName: String, properties: [PropertyInfo]) -> DeclSyntax {
+/// `header` names the extended type and its conformances. With `decodable`, for an embedded
+/// schema, keys are column names, `nil` is encoded as null, values decode as they encode, a
+/// missing key keeps the property's default, and `cast(_:)` accepts only the type itself.
+private func generateEncodableExtension(header: String, properties: [PropertyInfo], decodable: Bool = false) -> DeclSyntax {
     // Build CodingKeys cases
     var codingKeyCases: [String] = []
     for prop in properties {
         let jsonKey: String
         if let override = prop.columnName {
             jsonKey = override
-        } else if prop.wrapper == .softDelete {
+        } else if prop.wrapper == .softDelete || decodable {
             // Match the registry's database column, including acronym suffixes.
             jsonKey = prop.name.snakeCase()
         } else {
@@ -491,7 +510,7 @@ private func generateEncodableExtension(typeName: String, properties: [PropertyI
     for prop in properties {
         switch prop.wrapper {
         case .id, .column, .timestamp, .softDelete, .foreignKey:
-            if prop.isOptional {
+            if prop.isOptional && !decodable {
                 encodeStatements.append(
                     "try container.encodeIfPresent(self.\(prop.name), forKey: .\(prop.name))"
                 )
@@ -513,9 +532,32 @@ private func generateEncodableExtension(typeName: String, properties: [PropertyI
 
     let codingKeysBody = codingKeyCases.joined(separator: "\n            ")
     let encodeBody = encodeStatements.joined(separator: "\n            ")
+    var decodeInit = ""
+    if decodable {
+        let decodeBody = properties
+            .filter { columnAttributeNames.contains(wrapperAttributeName($0.wrapper)) }
+            .map { prop in
+                prop.isOptional
+                    ? "if container.contains(.\(prop.name)) { self.\(prop.name) = try container.decodeIfPresent(\(prop.typeName).self, forKey: .\(prop.name)) }"
+                    : "if let __v = try container.decodeIfPresent(\(prop.typeName).self, forKey: .\(prop.name)) { self.\(prop.name) = __v }"
+            }
+            .joined(separator: "\n            ")
+        decodeInit = """
+
+
+            public init(from decoder: Decoder) throws {
+                self.init()
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                \(decodeBody)
+            }
+
+            /// Changesets cast params into an embedded schema with `castEmbed`.
+            public static func cast(_ value: any Sendable) -> Self? { value as? Self }
+        """
+    }
 
     return """
-    extension \(raw: typeName): Encodable {
+    extension \(raw: header) {
         enum CodingKeys: String, CodingKey {
             \(raw: codingKeysBody)
         }
@@ -523,7 +565,7 @@ private func generateEncodableExtension(typeName: String, properties: [PropertyI
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             \(raw: encodeBody)
-        }
+        }\(raw: decodeInit)
     }
     """
 }
