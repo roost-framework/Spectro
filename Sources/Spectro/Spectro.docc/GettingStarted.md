@@ -9,7 +9,7 @@ Install the library, define a model, and query a PostgreSQL database.
 Spectro requires Swift 6.0 or later and supports macOS 13 or later and Linux. Add the package dependency and the `SpectroKit` product to your application target:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.6.0")
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "3.0.0")
 ```
 
 ```swift

@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 3.0.0 — 2026-10-22
+
+Spectro 3.0 closes most of the gap with Ecto for PostgreSQL. Upgrading from 2.x: give `@Column` properties a `DatabaseValue` type; properties of other types were silently neither stored nor decoded. Add `staleRecord` to exhaustive switches over `SpectroError`, `custom` to those over `FieldType`, and the new column types to those over `MigrationColumnType`. Call `SchemaMapper.extractData` with `try`. A non-NULL value a field cannot decode, such as an unknown enum label, now throws `SpectroError.resultDecodingFailed` instead of leaving the field's default.
 
 - Add `orderBy(sql:_:)` to `Query` and `TupleQuery`, to sort by an `SQLFragment`. Fragment and field sorts keep call order, and the fragment's parameters bind after the filters'. `count()`, aggregates, and direct bulk writes drop the ordering with its parameters.
 - Add `Repo.executeRawQuery(_:)`, like Ecto's `Repo.query`, to run a statement written as an `SQLFragment`, with its placeholders numbered.
@@ -55,6 +57,9 @@
 - Throw `SpectroError.resultDecodingFailed` for a non-NULL value a field's type cannot decode, such as an unknown enum label or JSON of another shape. The field silently kept its default, which a later save wrote back.
 - Decode models selected with `selectFields` from a subset of their columns; the other fields keep their defaults. Decoding trapped. Decoding any other result that lacks a model's column throws `SpectroError.resultDecodingFailed` instead of trapping.
 - Share one implementation of CRUD between `GenericDatabaseRepo` and `TransactionRepo`.
+- Report 3.0.0 from `spectro --version`, pin the Mint installation examples and the Mintfile to 3.0.0, and require 3.0.0 in the package installation examples.
+
+[Full comparison with 2.6.0](https://github.com/roost-framework/Spectro/compare/2.6.0...3.0.0)
 
 ## 2.6.0 — 2026-10-19
 

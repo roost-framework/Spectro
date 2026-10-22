@@ -9,13 +9,13 @@ Add a migration executable to your package, register a declaration, and preview 
 Use Spectro 2.1.0 or later in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/roost-framework/Spectro.git", from: "2.6.0")
+.package(url: "https://github.com/roost-framework/Spectro.git", from: "3.0.0")
 ```
 
 Install the matching development CLI with Mint, then run initialization from your application package:
 
 ```sh
-mint install roost-framework/Spectro@2.6.0
+mint install roost-framework/Spectro@3.0.0
 spectro migrate init --target MyAppMigrations
 ```
 

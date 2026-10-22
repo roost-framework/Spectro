@@ -28,7 +28,7 @@ struct SpectroCommand: AsyncParsableCommand {
             Use 'spectro help migrate' for setup and configuration, or \
             'spectro help generate migration' for file generation.
             """,
-        version: "2.6.0",
+        version: "3.0.0",
         subcommands: [
             DatabaseGroup.self,
             MigrateGroup.self,
